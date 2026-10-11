@@ -49,8 +49,8 @@ async def test_crash_journal_recovers_after_reopen(tmp_path):
         job = await first.create(BroadcastMessage("Hello"), [1, 2])
         async with first._database.engine.begin() as connection:
             await connection.execute(
-                update(first.tables.deliveries)
-                .where(first.tables.deliveries.c.chat_id == 1)
+                update(first._tables.deliveries)
+                .where(first._tables.deliveries.c.chat_id == 1)
                 .values(status="sending")
             )
     transport = FakeTransport()
@@ -123,14 +123,16 @@ async def test_connection_pragmas_and_foreign_keys(harness):
     )
     async with engine.begin() as connection:
         await connection.execute(
-            client.tables.broadcasts.delete().where(
-                client.tables.broadcasts.c.id == job
+            client._tables.broadcasts.delete().where(
+                client._tables.broadcasts.c.id == job
             )
         )
     async with engine.connect() as connection:
-        assert (await connection.execute(client.tables.deliveries.select())).all() == []
         assert (
-            await connection.execute(client.tables.notifications.select())
+            await connection.execute(client._tables.deliveries.select())
+        ).all() == []
+        assert (
+            await connection.execute(client._tables.notifications.select())
         ).all() == []
 
 

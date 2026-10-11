@@ -1,6 +1,7 @@
 """SQLite ownership, configuration and serialized schema initialization."""
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from time import monotonic
 
@@ -10,6 +11,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from .errors import ConfigurationError
 from .schema import build_tables
+
+SCHEMA_VERSION = 1
 
 
 class Database:
@@ -45,7 +48,18 @@ class Database:
             try:
                 async with self.engine.begin() as connection:
                     await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+                    result = await connection.exec_driver_sql("PRAGMA user_version")
+                    version = result.scalar_one()
+                    if version not in (0, SCHEMA_VERSION):
+                        raise ConfigurationError(
+                            f"Unsupported SQLite schema version {version}; "
+                            f"this library supports version {SCHEMA_VERSION}"
+                        )
                     await connection.run_sync(self.tables.metadata.create_all)
+                    if version == 0:
+                        await connection.exec_driver_sql(
+                            f"PRAGMA user_version={SCHEMA_VERSION}"
+                        )
                 self._initialized = True
             finally:
                 schema_lock.release()
@@ -55,7 +69,7 @@ class Database:
         await self.engine.dispose()
 
 
-def _configure_connection(connection, _record) -> None:
+def _configure_connection(connection: sqlite3.Connection, _record: object) -> None:
     cursor = connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=ON")

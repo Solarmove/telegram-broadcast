@@ -66,7 +66,8 @@ class AiogramTransport:
             )
             return SentMessage(result.message_id)
         except Exception as exc:
-            raise _translate(exc) from exc
+            _raise_if_translated(exc)
+            raise
 
     async def report(self, chat_id: int, text: str, message_id: int | None) -> int:
         try:
@@ -88,9 +89,11 @@ class AiogramTransport:
                 and "message to edit not found" in exc.message.lower()
             ):
                 return await self.report(chat_id, text, None)
-            raise _translate(exc) from exc
+            _raise_if_translated(exc)
+            raise
         except Exception as exc:
-            raise _translate(exc) from exc
+            _raise_if_translated(exc)
+            raise
 
 
 def _translate(exc: Exception) -> Exception:
@@ -110,3 +113,9 @@ def _translate(exc: Exception) -> Exception:
     if isinstance(exc, TelegramUnauthorizedError):
         return PermanentSendError(str(exc))
     return exc
+
+
+def _raise_if_translated(exc: Exception) -> None:
+    translated = _translate(exc)
+    if translated is not exc:
+        raise translated from exc

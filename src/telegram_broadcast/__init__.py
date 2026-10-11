@@ -11,6 +11,7 @@ from .errors import (
     RecipientUnavailable,
     WrongBot,
 )
+from .transport import BroadcastTransport
 from .types import (
     BroadcastMessage,
     BroadcastResult,
@@ -25,6 +26,7 @@ from .types import (
 
 __all__ = [
     "BroadcastClient",
+    "BroadcastTransport",
     "BroadcastMessage",
     "BroadcastResult",
     "BroadcastStatus",

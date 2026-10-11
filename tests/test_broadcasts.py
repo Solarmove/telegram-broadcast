@@ -103,7 +103,7 @@ async def test_permanent_failure_stops_broadcast_and_redacts_token(harness):
     assert result.remaining == 1
     assert TOKEN not in result.error
     async with engine.connect() as conn:
-        rows = (await conn.execute(select(client.tables.broadcasts))).mappings().all()
+        rows = (await conn.execute(select(client._tables.broadcasts))).mappings().all()
     assert TOKEN not in str(rows)
 
 
@@ -116,7 +116,7 @@ async def test_rate_limit_returns_retry_time_and_preserves_pending(harness):
     assert result.processed == 0 and result.next_retry_at is not None
     assert (await client.get_deliveries(job))[0].status == DeliveryStatus.PENDING
     async with engine.begin() as conn:
-        await conn.execute(client.tables.cooldowns.delete())
+        await conn.execute(client._tables.cooldowns.delete())
     result = await client.run(job)
     assert result.success == 2
 
@@ -236,8 +236,8 @@ async def test_recover_existing_journal(harness):
     job = await client.create(BroadcastMessage("Hello"), [1, 2])
     async with engine.begin() as conn:
         await conn.execute(
-            update(client.tables.deliveries)
-            .where(client.tables.deliveries.c.chat_id == 1)
+            update(client._tables.deliveries)
+            .where(client._tables.deliveries.c.chat_id == 1)
             .values(status="sending")
         )
     result = await client.run(job)
@@ -247,19 +247,19 @@ async def test_recover_existing_journal(harness):
 async def test_commit_failure_does_not_publish_success(harness, monkeypatch):
     client, _, *_ = harness
     job = await client.create(BroadcastMessage("Hello"), [1, 2])
-    original = client._repository.delivery
+    original = client._repository.finish_delivery
 
     async def failing_delivery(*args, **kwargs):
         await original(*args, **kwargs)
         if args[3] == DeliveryStatus.SUCCESS:
             raise RuntimeError("database transaction failed")
 
-    monkeypatch.setattr(client._repository, "delivery", failing_delivery)
+    monkeypatch.setattr(client._repository, "finish_delivery", failing_delivery)
     with pytest.raises(RuntimeError):
         await client.run(job)
     assert (await client.get_result(job)).success == 0
     assert (await client.get_deliveries(job))[0].status == DeliveryStatus.SENDING
-    monkeypatch.setattr(client._repository, "delivery", original)
+    monkeypatch.setattr(client._repository, "finish_delivery", original)
     result = await client.run(job)
     assert result.success == 1 and result.unknown == 1
 

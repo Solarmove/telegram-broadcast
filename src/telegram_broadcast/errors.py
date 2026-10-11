@@ -20,7 +20,7 @@ class WrongBot(BroadcastError):
 
 
 class BotBusy(BroadcastError):
-    """Another runner currently holds this bot's database lock."""
+    """Another process is currently running a broadcast for this bot."""
 
 
 class InvalidTransition(BroadcastError):

@@ -1,19 +1,17 @@
 """Public facade and resource lifecycle."""
 
-import re
 from collections.abc import Iterable
 from math import isfinite
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from aiogram.utils.token import extract_bot_id, validate_token
-from sqlalchemy import insert, update
 
 from .database import Database
-from .errors import InvalidTransition
 from .locking import FileBotLock
 from .repository import Repository
 from .runner import Runner
+from .sanitization import ErrorSanitizer
 from .transport import AiogramTransport, BroadcastTransport
 from .types import (
     BroadcastMessage,
@@ -47,9 +45,9 @@ class BroadcastClient:
         self.bot_id = extract_bot_id(bot_token)
         self._database = Database(database_path)
         self.database_path = self._database.path
-        self.tables = self._database.tables
+        self._tables = self._database.tables
         self._sessions = self._database.sessions
-        self._repository = Repository(self.tables, self.bot_id)
+        self._repository = Repository(self._tables, self.bot_id)
         self._lock = FileBotLock(self.database_path)
         self._owned_transport = (
             AiogramTransport(bot_token) if transport is None else None
@@ -60,7 +58,7 @@ class BroadcastClient:
             assert self._owned_transport is not None
             self._transport = self._owned_transport
         self._policy = policy or RunPolicy()
-        self._token = bot_token
+        self._error_sanitizer = ErrorSanitizer(bot_token)
 
     async def __aenter__(self) -> "BroadcastClient":
         try:
@@ -94,44 +92,15 @@ class BroadcastClient:
         if not title.strip() or len(title) > 200:
             raise ValueError("title must contain 1 to 200 characters")
         await self._database.initialize()
-        job_id = uuid4()
         async with self._sessions.begin() as session:
-            await session.execute(
-                insert(self.tables.broadcasts).values(
-                    id=job_id,
-                    bot_id=self.bot_id,
-                    title=title,
-                    text=message.text,
-                    media_url=message.media_url,
-                    media_type=message.media_type.value if message.media_type else None,
-                    parse_mode=message.parse_mode,
-                    status="queued",
-                    total=len(recipients),
-                )
+            return await self._repository.create_broadcast(
+                session, message, recipients, notifications, title
             )
-            # Keep insert batches bounded for large recipient lists.
-            for start in range(0, len(recipients), 1000):
-                await session.execute(
-                    insert(self.tables.deliveries),
-                    [
-                        dict(broadcast_id=job_id, chat_id=value, status="pending")
-                        for value in recipients[start : start + 1000]
-                    ],
-                )
-            for start in range(0, len(notifications), 1000):
-                await session.execute(
-                    insert(self.tables.notifications),
-                    [
-                        dict(broadcast_id=job_id, chat_id=value)
-                        for value in notifications[start : start + 1000]
-                    ],
-                )
-        return job_id
 
     async def get_result(self, job_id: UUID) -> BroadcastResult:
         await self._database.initialize()
         async with self._sessions() as session:
-            return await self._repository.result(session, job_id)
+            return await self._repository.get_result(session, job_id)
 
     async def get_deliveries(
         self, job_id: UUID, *, limit: int = 100, offset: int = 0
@@ -140,7 +109,9 @@ class BroadcastClient:
             raise ValueError("limit must be 1..1000 and offset nonnegative")
         await self._database.initialize()
         async with self._sessions() as session:
-            return await self._repository.deliveries(session, job_id, limit, offset)
+            return await self._repository.list_deliveries(
+                session, job_id, limit, offset
+            )
 
     async def pause(self, job_id: UUID) -> None:
         await self._transition(
@@ -169,25 +140,9 @@ class BroadcastClient:
     ) -> None:
         await self._database.initialize()
         async with self._sessions.begin() as session:
-            await self._repository.job(session, job_id)
-            table = self.tables.broadcasts
-            result = await session.execute(
-                update(table)
-                .where(
-                    table.c.id == job_id, table.c.status.in_([s.value for s in allowed])
-                )
-                .values(status=target.value)
-                .returning(table.c.id)
+            await self._repository.transition_broadcast(
+                session, job_id, allowed, target
             )
-            if result.scalar_one_or_none() is None:
-                raise InvalidTransition(f"Cannot change broadcast to {target.value}")
-
-    def _safe_error(self, exc: Exception) -> str:
-        return re.sub(
-            r"\d{5,}:[A-Za-z0-9_-]{20,}",
-            "[redacted]",
-            str(exc).replace(self._token, "[redacted]"),
-        )[:2000]
 
     async def run(
         self,
@@ -206,7 +161,7 @@ class BroadcastClient:
             self._sessions,
             self._transport,
             self._policy,
-            self._safe_error,
+            self._error_sanitizer,
         )
         async with self._lock.acquire(self.bot_id):
             await runner.run(

@@ -1,4 +1,4 @@
-"""Explicit, sequential runner with a durable journal around network calls."""
+"""Drive broadcast transitions; delegate all persistence to Repository."""
 
 import asyncio
 from collections.abc import Callable
@@ -6,7 +6,6 @@ from datetime import timedelta
 from time import monotonic
 from uuid import UUID
 
-from sqlalchemy import RowMapping, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .errors import (
@@ -16,16 +15,10 @@ from .errors import (
     RecipientUnavailable,
 )
 from .reporting import Reporter
-from .repository import Repository, aware
+from .repository import PendingDelivery, Repository, StoredBroadcast
 from .schema import utcnow
 from .transport import BroadcastTransport
-from .types import (
-    BroadcastMessage,
-    BroadcastStatus,
-    DeliveryStatus,
-    MediaType,
-    RunPolicy,
-)
+from .types import BroadcastStatus, DeliveryStatus, RunPolicy
 
 
 class Runner:
@@ -35,58 +28,60 @@ class Runner:
         sessions: async_sessionmaker[AsyncSession],
         transport: BroadcastTransport,
         policy: RunPolicy,
-        safe_error: Callable[[Exception], str],
+        sanitize_error: Callable[[Exception], str],
     ) -> None:
-        self.repo, self.sessions, self.transport = repository, sessions, transport
-        self.policy, self.safe_error = policy, safe_error
-        self.reporter = Reporter(repository, sessions, transport, safe_error)
-        self.last_report = float("-inf")
+        self.repo = repository
+        self.sessions = sessions
+        self.transport = transport
+        self.policy = policy
+        self.sanitize_error = sanitize_error
+        self.reporter = Reporter(repository, sessions, transport, sanitize_error)
+        self._last_report = float("-inf")
 
     async def run(
         self, job_id: UUID, *, wait_for_cooldown: bool, max_duration: float | None
     ) -> None:
-        deadline = monotonic() + max_duration if max_duration else float("inf")
+        deadline = (
+            monotonic() + max_duration if max_duration is not None else float("inf")
+        )
         async with self.sessions.begin() as session:
-            await self.repo.job(session, job_id)
-            await self.repo.recover(session, job_id)
-        try:
-            await self._loop(job_id, wait_for_cooldown, deadline)
-        finally:
-            # Returning normally preserves queued state for the host scheduler.
-            # CancelledError must not trigger additional Telegram calls.
-            async with self.sessions.begin() as session:
-                row = await self.repo.job(session, job_id)
-                if row["status"] == "running":
-                    await self.repo.set_job(session, job_id, status="queued")
+            await self.repo.get_broadcast(session, job_id)
+            await self.repo.recover_interrupted_deliveries(session, job_id)
 
+        # Leave RUNNING persisted on cancellation or an unexpected error.
+        # The next process can classify a stranded SENDING delivery as UNKNOWN.
+        await self._loop(job_id, wait_for_cooldown, deadline)
+        async with self.sessions.begin() as session:
+            await self.repo.release_runner(session, job_id)
         await self.reporter.send(job_id)
 
     async def _loop(self, job_id: UUID, wait: bool, deadline: float) -> None:
         while monotonic() < deadline:
             async with self.sessions() as session:
-                row = await self.repo.job(session, job_id)
-                cooldown = await self.repo.cooldown(session)
-            status = BroadcastStatus(row["status"])
-            if status == BroadcastStatus.PAUSED or status.terminal:
+                broadcast = await self.repo.get_broadcast(session, job_id)
+                cooldown = await self.repo.get_cooldown(session)
+            if broadcast.status == BroadcastStatus.PAUSED or broadcast.status.terminal:
                 return
             retry_at = max(
-                filter(None, (cooldown, aware(row["next_retry_at"]))), default=None
+                filter(None, (cooldown, broadcast.next_retry_at)), default=None
             )
-            if retry_at and retry_at > utcnow():
+            if retry_at is not None and retry_at > utcnow():
                 if not wait:
                     return
+                remaining = (retry_at - utcnow()).total_seconds()
                 await asyncio.sleep(
                     min(
                         self.policy.control_poll_interval,
-                        max(0, (retry_at - utcnow()).total_seconds()),
+                        remaining,
                         max(0, deadline - monotonic()),
                     )
                 )
                 continue
+
             delivery = await self._prepare_delivery(job_id, deadline)
             if delivery is None:
                 continue
-            if not await self._send(job_id, delivery["chat_id"], row):
+            if not await self._send(job_id, broadcast, delivery):
                 return
             await self._pace(job_id, deadline)
 
@@ -97,101 +92,82 @@ class Runner:
                 min(self.policy.control_poll_interval, max(0, until - monotonic()))
             )
             async with self.sessions() as session:
-                row = await self.repo.job(session, job_id)
-            if row["status"] != "running":
+                broadcast = await self.repo.get_broadcast(session, job_id)
+            if broadcast.status != BroadcastStatus.RUNNING:
                 return
 
     async def _prepare_delivery(
         self, job_id: UUID, deadline: float
-    ) -> RowMapping | None:
+    ) -> PendingDelivery | None:
         async with self.sessions.begin() as session:
-            table = self.repo.tables.broadcasts
-            changed = await session.execute(
-                update(table)
-                .where(table.c.id == job_id, table.c.status.in_(["queued", "running"]))
-                .values(status="running", next_retry_at=None)
-                .returning(table.c.id)
-            )
-            if changed.scalar_one_or_none() is None:
-                return None
-            delivery = await self.repo.next_delivery(session, job_id)
-            if delivery is None:
-                await self.repo.set_job(session, job_id, status="completed")
-                return None
-        if monotonic() - self.last_report >= self.policy.report_interval:
+            delivery = await self.repo.claim_next_delivery(session, job_id)
+        if delivery is None:
+            return None
+
+        if monotonic() - self._last_report >= self.policy.report_interval:
             await self.reporter.send(job_id)
-            self.last_report = monotonic()
+            self._last_report = monotonic()
         if monotonic() >= deadline:
             return None
         async with self.sessions.begin() as session:
-            current = await self.repo.job(session, job_id)
-            cooldown = await self.repo.cooldown(session)
-            if current["status"] != "running" or (cooldown and cooldown > utcnow()):
+            cooldown = await self.repo.get_cooldown(session)
+            if cooldown is not None and cooldown > utcnow():
                 return None
-            await self.repo.delivery(
-                session, job_id, delivery["chat_id"], DeliveryStatus.SENDING
-            )
+            if not await self.repo.mark_sending(session, job_id, delivery.chat_id):
+                return None
         return delivery
 
-    async def _send(self, job_id: UUID, chat_id: int, row: RowMapping) -> bool:
-        message = BroadcastMessage(
-            row["text"],
-            row["media_url"],
-            MediaType(row["media_type"]) if row["media_type"] else None,
-            row["parse_mode"],
-        )
+    async def _send(
+        self, job_id: UUID, broadcast: StoredBroadcast, delivery: PendingDelivery
+    ) -> bool:
+        chat_id = delivery.chat_id
         try:
-            sent = await self.transport.send(chat_id, message, row["media_file_id"])
+            sent = await self.transport.send(
+                chat_id, broadcast.message, broadcast.media_file_id
+            )
         except RateLimited as exc:
             async with self.sessions.begin() as session:
-                await self.repo.delivery(
-                    session, job_id, chat_id, DeliveryStatus.PENDING
-                )
-                await self.repo.set_cooldown(
-                    session, utcnow() + timedelta(seconds=exc.retry_after)
-                )
+                await self.repo.retry_delivery(session, job_id, chat_id)
+                retry_at = utcnow() + timedelta(seconds=exc.retry_after)
+                await self.repo.extend_cooldown(session, retry_at)
+                await self.repo.record_retry_after(session, job_id, retry_at)
             return True
         except RecipientUnavailable as exc:
             async with self.sessions.begin() as session:
-                await self.repo.delivery(
+                await self.repo.finish_delivery(
                     session,
                     job_id,
                     chat_id,
                     DeliveryStatus.FAILED,
-                    error=self.safe_error(exc),
+                    error=self.sanitize_error(exc),
                 )
             return True
         except DeliveryUncertain as exc:
             async with self.sessions.begin() as session:
-                await self.repo.delivery(
+                await self.repo.finish_delivery(
                     session,
                     job_id,
                     chat_id,
                     DeliveryStatus.UNKNOWN,
-                    error=self.safe_error(exc),
+                    error=self.sanitize_error(exc),
                 )
-                await self.repo.set_job(
-                    session,
-                    job_id,
-                    next_retry_at=utcnow()
-                    + timedelta(seconds=self.policy.network_retry_delay),
-                )
+                retry_at = utcnow() + timedelta(seconds=self.policy.network_retry_delay)
+                await self.repo.record_retry_after(session, job_id, retry_at)
             return False
         except PermanentSendError as exc:
             async with self.sessions.begin() as session:
-                await self.repo.delivery(
+                await self.repo.finish_delivery(
                     session,
                     job_id,
                     chat_id,
                     DeliveryStatus.FAILED,
-                    error=self.safe_error(exc),
+                    error=self.sanitize_error(exc),
                 )
-                await self.repo.set_job(
-                    session, job_id, status="failed", error=self.safe_error(exc)
-                )
+                await self.repo.set_failed(session, job_id, self.sanitize_error(exc))
             return False
+
         async with self.sessions.begin() as session:
-            await self.repo.delivery(
+            await self.repo.finish_delivery(
                 session,
                 job_id,
                 chat_id,
@@ -199,7 +175,7 @@ class Runner:
                 message_id=sent.message_id,
             )
             if sent.media_file_id:
-                await self.repo.set_job(
-                    session, job_id, media_file_id=sent.media_file_id
+                await self.repo.record_media_file_id(
+                    session, job_id, sent.media_file_id
                 )
         return True
