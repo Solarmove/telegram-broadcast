@@ -1,30 +1,10 @@
 import asyncio
-from contextlib import asynccontextmanager
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.orm import DeclarativeBase
 
-from telegram_broadcast import BotBusy, BroadcastClient, RunPolicy, SentMessage
+from telegram_broadcast import BroadcastClient, RunPolicy, SentMessage
 
 TOKEN = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
-
-
-class LocalLock:
-    """Shared test lock. Never a cross-process substitute for PostgreSQL."""
-
-    def __init__(self):
-        self.busy = set()
-
-    @asynccontextmanager
-    async def acquire(self, bot_id):
-        if bot_id in self.busy:
-            raise BotBusy("busy")
-        self.busy.add(bot_id)
-        try:
-            yield
-        finally:
-            self.busy.remove(bot_id)
 
 
 class FakeTransport:
@@ -61,18 +41,12 @@ class FakeTransport:
 
 
 @pytest.fixture
-async def harness():
-    class Base(DeclarativeBase):
-        pass
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    transport, lock = FakeTransport(), LocalLock()
+async def harness(tmp_path):
+    transport = FakeTransport()
     client = BroadcastClient(
         TOKEN,
-        base=Base,
-        engine=engine,
+        database_path=tmp_path / "broadcasts.sqlite3",
         transport=transport,
-        lock=lock,
         policy=RunPolicy(
             send_interval=0,
             report_interval=999,
@@ -81,5 +55,4 @@ async def harness():
         ),
     )
     async with client:
-        yield client, transport, engine, Base, lock
-    await engine.dispose()
+        yield client, transport, client._database.engine

@@ -3,18 +3,17 @@
 import re
 from collections.abc import Iterable
 from math import isfinite
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from aiogram.utils.token import extract_bot_id, validate_token
 from sqlalchemy import insert, update
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
 
-from .errors import ConfigurationError, InvalidTransition
-from .locking import BotLock, PostgresBotLock
+from .database import Database
+from .errors import InvalidTransition
+from .locking import FileBotLock
 from .repository import Repository
 from .runner import Runner
-from .schema import register_tables
 from .transport import AiogramTransport, BroadcastTransport
 from .types import (
     BroadcastMessage,
@@ -40,28 +39,18 @@ class BroadcastClient:
         self,
         bot_token: str,
         *,
-        base: type[DeclarativeBase],
-        engine: AsyncEngine,
-        session_factory: async_sessionmaker[AsyncSession] | None = None,
-        prefix: str = "tg_broadcast",
+        database_path: str | Path = "broadcasts.sqlite3",
         policy: RunPolicy | None = None,
         transport: BroadcastTransport | None = None,
-        lock: BotLock | None = None,
-        auto_create_tables: bool = True,
     ) -> None:
         validate_token(bot_token)
         self.bot_id = extract_bot_id(bot_token)
-        self.tables = register_tables(base, prefix=prefix)
-        self._engine = engine
-        self._sessions = session_factory or async_sessionmaker(
-            engine, expire_on_commit=False
-        )
+        self._database = Database(database_path)
+        self.database_path = self._database.path
+        self.tables = self._database.tables
+        self._sessions = self._database.sessions
         self._repository = Repository(self.tables, self.bot_id)
-        self._lock = lock or PostgresBotLock(engine)
-        if session_factory is not None and session_factory.kw.get("bind") is not engine:
-            raise ConfigurationError(
-                "session_factory must be bound to the supplied engine"
-            )
+        self._lock = FileBotLock(self.database_path)
         self._owned_transport = (
             AiogramTransport(bot_token) if transport is None else None
         )
@@ -71,32 +60,25 @@ class BroadcastClient:
             assert self._owned_transport is not None
             self._transport = self._owned_transport
         self._policy = policy or RunPolicy()
-        self._auto_create = auto_create_tables
         self._token = bot_token
 
     async def __aenter__(self) -> "BroadcastClient":
-        if self._auto_create:
-            try:
-                await self.create_tables()
-            except BaseException:
-                await self.close()
-                raise
+        try:
+            await self._database.initialize()
+        except BaseException:
+            await self.close()
+            raise
         return self
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
 
     async def close(self) -> None:
-        if self._owned_transport is not None:
-            await self._owned_transport.close()
-
-    async def create_tables(self) -> None:
-        async with self._engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync: self.tables.metadata.create_all(
-                    sync, tables=list(self.tables.all), checkfirst=True
-                )
-            )
+        try:
+            if self._owned_transport is not None:
+                await self._owned_transport.close()
+        finally:
+            await self._database.close()
 
     async def create(
         self,
@@ -111,6 +93,7 @@ class BroadcastClient:
             raise ValueError("At least one recipient is required")
         if not title.strip() or len(title) > 200:
             raise ValueError("title must contain 1 to 200 characters")
+        await self._database.initialize()
         job_id = uuid4()
         async with self._sessions.begin() as session:
             await session.execute(
@@ -126,7 +109,7 @@ class BroadcastClient:
                     total=len(recipients),
                 )
             )
-            # Bound statement sizes for asyncpg's parameter limit.
+            # Keep insert batches bounded for large recipient lists.
             for start in range(0, len(recipients), 1000):
                 await session.execute(
                     insert(self.tables.deliveries),
@@ -146,6 +129,7 @@ class BroadcastClient:
         return job_id
 
     async def get_result(self, job_id: UUID) -> BroadcastResult:
+        await self._database.initialize()
         async with self._sessions() as session:
             return await self._repository.result(session, job_id)
 
@@ -154,6 +138,7 @@ class BroadcastClient:
     ) -> tuple[DeliveryResult, ...]:
         if not 1 <= limit <= 1000 or offset < 0:
             raise ValueError("limit must be 1..1000 and offset nonnegative")
+        await self._database.initialize()
         async with self._sessions() as session:
             return await self._repository.deliveries(session, job_id, limit, offset)
 
@@ -182,6 +167,7 @@ class BroadcastClient:
         allowed: tuple[BroadcastStatus, ...],
         target: BroadcastStatus,
     ) -> None:
+        await self._database.initialize()
         async with self._sessions.begin() as session:
             await self._repository.job(session, job_id)
             table = self.tables.broadcasts
@@ -214,6 +200,7 @@ class BroadcastClient:
             not isfinite(max_duration) or max_duration <= 0
         ):
             raise ValueError("max_duration must be finite and positive")
+        await self._database.initialize()
         runner = Runner(
             self._repository,
             self._sessions,

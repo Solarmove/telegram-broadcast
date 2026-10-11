@@ -1,9 +1,7 @@
-"""Attach Core tables to the caller's Base without creating a global ORM registry."""
+"""Private schema owned by the library, independent of application metadata."""
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from threading import RLock
 
 from sqlalchemy import (
     BigInteger,
@@ -20,12 +18,6 @@ from sqlalchemy import (
     Uuid,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase
-
-from telegram_broadcast.errors import ConfigurationError
-
-_REGISTRATION_LOCK = RLock()
-_CACHE_KEY = "telegram_broadcast.registered_tables"
 
 
 def utcnow() -> datetime:
@@ -45,34 +37,13 @@ class BroadcastTables:
         return (self.broadcasts, self.deliveries, self.notifications, self.cooldowns)
 
 
-def register_tables(
-    base: type[DeclarativeBase], *, prefix: str = "tg_broadcast"
-) -> BroadcastTables:
-    """Register once per metadata/prefix. No database I/O or application-table DDL."""
-    metadata = getattr(base, "metadata", None)
-    if not isinstance(metadata, MetaData):
-        raise ConfigurationError("base must expose SQLAlchemy MetaData")
-    if not re.fullmatch(r"[a-z][a-z0-9_]{0,30}", prefix):
-        raise ConfigurationError(
-            "prefix must be a lowercase SQL identifier of at most 31 characters"
-        )
-    with _REGISTRATION_LOCK:
-        cache = metadata.info.setdefault(_CACHE_KEY, {})
-        if prefix in cache:
-            return cache[prefix]
-        names = [
-            f"{prefix}_{suffix}"
-            for suffix in ("jobs", "deliveries", "notifications", "cooldowns")
-        ]
-        if any(
-            (f"{metadata.schema}.{name}" if metadata.schema else name)
-            in metadata.tables
-            for name in names
-        ):
-            raise ConfigurationError("Table names already exist; choose another prefix")
-        tables = _build_tables(metadata, names)
-        cache[prefix] = tables
-        return tables
+def build_tables() -> BroadcastTables:
+    """Each client gets its own metadata; persisted table names remain stable."""
+    names = [
+        f"tg_broadcast_{suffix}"
+        for suffix in ("jobs", "deliveries", "notifications", "cooldowns")
+    ]
+    return _build_tables(MetaData(), names)
 
 
 def _build_tables(metadata: MetaData, names: list[str]) -> BroadcastTables:

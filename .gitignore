@@ -6,3 +6,11 @@ __pycache__/
 dist/
 *.db
 artifacts/
+
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+*.locks/
+*.schema.lock

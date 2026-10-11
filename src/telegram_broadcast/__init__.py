@@ -11,7 +11,6 @@ from .errors import (
     RecipientUnavailable,
     WrongBot,
 )
-from .schema import BroadcastTables, register_tables
 from .types import (
     BroadcastMessage,
     BroadcastResult,
@@ -29,14 +28,12 @@ __all__ = [
     "BroadcastMessage",
     "BroadcastResult",
     "BroadcastStatus",
-    "BroadcastTables",
     "DeliveryResult",
     "DeliveryStatus",
     "MediaType",
     "NotificationResult",
     "RunPolicy",
     "SentMessage",
-    "register_tables",
     "BotBusy",
     "BroadcastError",
     "BroadcastNotFound",

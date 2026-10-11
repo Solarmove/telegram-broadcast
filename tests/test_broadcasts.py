@@ -2,14 +2,13 @@ import asyncio
 
 import pytest
 from conftest import TOKEN
-from sqlalchemy import Column, Integer, Table, inspect, select, update
+from sqlalchemy import inspect, select, update
 
 from telegram_broadcast import (
     BotBusy,
     BroadcastClient,
     BroadcastMessage,
     BroadcastStatus,
-    ConfigurationError,
     DeliveryStatus,
     DeliveryUncertain,
     InvalidTransition,
@@ -18,7 +17,6 @@ from telegram_broadcast import (
     RateLimited,
     RecipientUnavailable,
     WrongBot,
-    register_tables,
 )
 
 
@@ -42,17 +40,17 @@ async def test_success_deduplication_reports_and_idempotent_run(harness):
     assert deliveries[0].status == DeliveryStatus.SUCCESS
 
 
-async def test_register_once_and_create_only_owned_tables(harness):
-    client, _, engine, base, _ = harness
-    Table("host_table", base.metadata, Column("id", Integer, primary_key=True))
-    assert register_tables(base) is client.tables
-    await client.create_tables()
+async def test_owned_tables_are_created_idempotently(harness):
+    client, _, engine = harness
+    await client._database.initialize()
     async with engine.connect() as conn:
         names = await conn.run_sync(lambda sync: inspect(sync).get_table_names())
-    assert "host_table" not in names
-    assert len(names) == 4
-    with pytest.raises(ConfigurationError):
-        register_tables(base, prefix="BAD")
+    assert set(names) == {
+        "tg_broadcast_jobs",
+        "tg_broadcast_deliveries",
+        "tg_broadcast_notifications",
+        "tg_broadcast_cooldowns",
+    }
 
 
 async def test_recipient_failure_does_not_stop_others(harness):
@@ -189,21 +187,20 @@ async def test_busy_lock(harness):
 
 
 async def test_wrong_bot_cannot_read_or_control(harness):
-    client, transport, engine, base, lock = harness
+    client, transport, _ = harness
     job = await client.create(BroadcastMessage("Hello"), [1])
     other = BroadcastClient(
         TOKEN.replace("123456", "987654"),
-        base=base,
-        engine=engine,
+        database_path=client.database_path,
         transport=transport,
-        lock=lock,
     )
-    with pytest.raises(WrongBot):
-        await other.get_result(job)
-    with pytest.raises(WrongBot):
-        await other.cancel(job)
-    with pytest.raises(WrongBot):
-        await other.run(job)
+    async with other:
+        with pytest.raises(WrongBot):
+            await other.get_result(job)
+        with pytest.raises(WrongBot):
+            await other.cancel(job)
+        with pytest.raises(WrongBot):
+            await other.run(job)
 
 
 async def test_media_file_id_reuse(harness):

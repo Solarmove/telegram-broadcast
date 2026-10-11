@@ -2,23 +2,11 @@ name: checks
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.13"]
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: broadcast
-          POSTGRES_PASSWORD: broadcast
-          POSTGRES_DB: broadcast_test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U broadcast -d broadcast_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    env:
-      TELEGRAM_BROADCAST_TEST_DSN: postgresql+asyncpg://broadcast:broadcast@localhost:5432/broadcast_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

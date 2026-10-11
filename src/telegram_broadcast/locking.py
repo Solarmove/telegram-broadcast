@@ -1,32 +1,28 @@
+"""OS-backed file locks serialize a bot's runs across local processes."""
+
 from collections.abc import AsyncIterator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Protocol
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from filelock import FileLock, Timeout
 
-from telegram_broadcast.errors import BotBusy, ConfigurationError
-
-
-class BotLock(Protocol):
-    def acquire(self, bot_id: int) -> AbstractAsyncContextManager[None]: ...
+from .errors import BotBusy
 
 
-class PostgresBotLock:
-    def __init__(self, engine: AsyncEngine):
-        if engine.dialect.name != "postgresql":
-            raise ConfigurationError(
-                "Running requires PostgreSQL; inject a local lock in SQLite tests"
-            )
-        self.engine = engine
+class FileBotLock:
+    def __init__(self, database_path: Path) -> None:
+        self.directory = database_path.with_name(database_path.name + ".locks")
 
     @asynccontextmanager
     async def acquire(self, bot_id: int) -> AsyncIterator[None]:
-        # Hold this independently of the delivery journal's commits.
-        async with self.engine.begin() as connection:
-            acquired = await connection.scalar(
-                text("SELECT pg_try_advisory_xact_lock(:bot_id)"), {"bot_id": bot_id}
-            )
-            if not acquired:
-                raise BotBusy(f"Bot {bot_id} already has an active runner")
+        self.directory.mkdir(parents=True, exist_ok=True)
+        # A fresh object avoids FileLock's reentrant acquisition in this process.
+        lock = FileLock(self.directory / f"{bot_id}.lock")
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            raise BotBusy(f"Bot {bot_id} already has an active runner") from None
+        try:
             yield
+        finally:
+            lock.release()
