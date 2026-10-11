@@ -277,9 +277,16 @@ async def test_max_duration_bounds_cooldown_wait(harness):
     client, transport, *_ = harness
     transport.outcomes[1] = [RateLimited(60)]
     job = await client.create(BroadcastMessage("Hello"), [1])
+    # Establish the cooldown before measuring a bounded run: slow SQLite I/O
+    # can otherwise consume the entire budget before Telegram is contacted.
+    initial = await client.run(job, wait_for_cooldown=False)
+    assert initial.next_retry_at is not None
+
     result = await asyncio.wait_for(client.run(job, max_duration=0.02), timeout=2)
     assert result.status == BroadcastStatus.QUEUED
-    assert result.success == 0 and result.next_retry_at is not None
+    assert result.success == 0 and result.next_retry_at == initial.next_retry_at
+    assert transport.sent == [(1, None)]
+    assert (await client.get_deliveries(job))[0].status == DeliveryStatus.PENDING
 
 
 async def test_duration_expired_during_report_does_not_mark_delivery_uncertain(
