@@ -8,6 +8,18 @@ Python 3.11+. SQLAlchemy и aiosqlite используются внутри би
 
 ## Установка
 
+Установка напрямую из GitHub (нужны Python 3.11+ и Git):
+
+```powershell
+python -m pip install "git+https://github.com/Solarmove/telegram-broadcast.git@main"
+```
+
+Обновление установленного пакета до актуального кода в `main`:
+
+```powershell
+python -m pip install --upgrade "git+https://github.com/Solarmove/telegram-broadcast.git@main"
+```
+
 Пакет можно установить из каталога проекта. Все зависимости для SQLite и Telegram устанавливаются автоматически:
 
 ```powershell
