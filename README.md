@@ -1,39 +1,53 @@
 # telegram-broadcast
 
+Актуальная версия: **0.2.0**.
+
 Асинхронная библиотека рассылок для Telegram со своей SQLite-базой. В приложение нужно передать только токен бота и путь к файлу. Библиотека создаёт каталог и таблицы, открывает и закрывает соединения, сохраняет прогресс и результаты. Токен в БД не записывается.
 
 Python 3.11+. SQLAlchemy и aiosqlite используются внутри библиотеки; настройка `Base`, engine и сессий приложения не требуется.
 
 ## Установка
 
-Пакет пока не опубликован в PyPI. Установка из локального проекта:
+Пакет можно установить из каталога проекта. Все зависимости для SQLite и Telegram устанавливаются автоматически:
 
 ```powershell
-python -m pip install "C:/Users/Fastflow/PycharmProjects/telegram-broadcast"
+cd C:/Users/Fastflow/PycharmProjects/telegram-broadcast
+python -m pip install .
 ```
+
+Для обновления установленной копии после изменения исходников выполните `python -m pip install --upgrade .`. Для разработки можно использовать `python -m pip install -e .` или `uv sync --locked`.
 
 ## Подключение
 
 ```python
+import asyncio
 import os
 
 from telegram_broadcast import BroadcastClient, BroadcastMessage
 
-async with BroadcastClient(
-    os.environ["TELEGRAM_BOT_TOKEN"],
-    database_path="data/broadcasts.sqlite3",
-) as broadcasts:
-    broadcast_id = await broadcasts.create(
-        BroadcastMessage("<b>Новая акция!</b>"),
-        recipient_ids=[123456789, 987654321],
-        notification_chat_ids=[123456789, -1001234567890],
-        title="Акция октября",
-    )
-    result = await broadcasts.run(broadcast_id)
-    print(result.status, result.success, result.failed, result.unknown)
+async def main() -> None:
+    async with BroadcastClient(
+        os.environ["TELEGRAM_BOT_TOKEN"],
+        database_path="data/broadcasts.sqlite3",
+    ) as broadcasts:
+        broadcast_id = await broadcasts.create(
+            BroadcastMessage("<b>Новая акция!</b>"),
+            recipient_ids=[123456789, 987654321],
+            notification_chat_ids=[123456789, -1001234567890],
+            title="Акция октября",
+        )
+        print("ID рассылки:", broadcast_id)
+        result = await broadcasts.run(broadcast_id)
+        print(result.status, result.success, result.failed, result.unknown)
 
-    result = await broadcasts.get_result(broadcast_id)
-    deliveries = await broadcasts.get_deliveries(broadcast_id, limit=100, offset=0)
+        result = await broadcasts.get_result(broadcast_id)
+        deliveries = await broadcasts.get_deliveries(broadcast_id, limit=100, offset=0)
+        for delivery in deliveries:
+            print(delivery.chat_id, delivery.status, delivery.error)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 По умолчанию файл называется `broadcasts.sqlite3` в текущем рабочем каталоге. Можно передать `str` или `pathlib.Path`; путь преобразуется в абсолютный при создании клиента. Для постоянного размещения лучше указать абсолютный путь. Библиотека использует файловую SQLite, а не `:memory:` или URL подключения.
@@ -43,6 +57,48 @@ async with BroadcastClient(
 `run()` запускается явно и возвращает `BroadcastResult`. Фоновые задачи контролирует приложение. Например, можно вызвать `asyncio.create_task(broadcasts.run(broadcast_id))`, сохранив задачу для ожидания и обработки исключений. Клиент должен оставаться открытым до завершения всех задач.
 
 Пример полного скрипта: [examples/basic.py](examples/basic.py). Перед запуском задайте `TELEGRAM_BOT_TOKEN` и замените ID.
+
+## Сообщения и настройки
+
+`BroadcastMessage` принимает `text`, `media_url`, `media_type` и `parse_mode`. HTML включён по умолчанию; для обычного текста задайте `parse_mode=None`, для MarkdownV2 — `parse_mode="MarkdownV2"`. Текст должен быть непустым, если не задано медиа. Библиотека проверяет длину исходной строки: до 4096 символов для текста и до 1024 для подписи к медиа.
+
+Для фото и видео одновременно указывайте HTTP(S) URL и значение перечисления `MediaType`; ссылка должна быть доступна Telegram:
+
+```python
+from telegram_broadcast import BroadcastMessage, MediaType
+
+message = BroadcastMessage(
+    text="Новое предложение",
+    media_url="https://example.org/photo.jpg",
+    media_type=MediaType.PHOTO,
+    parse_mode=None,
+)
+```
+
+Для видео используйте `MediaType.VIDEO`. Полученный Telegram file ID сохраняется и используется для следующих получателей этой рассылки. Локальные файлы, альбомы и клавиатуры в версии 0.2.0 не поддерживаются.
+
+Параметр `policy` конструктора принимает `RunPolicy`. Все интервалы задаются в секундах:
+
+| Параметр | По умолчанию | Назначение |
+| --- | --- | --- |
+| `send_interval` | `0.05` | Пауза после попытки отправки |
+| `report_interval` | `30` | Интервал обновления статистики |
+| `network_retry_delay` | `5` | Задержка перед следующим запуском после сетевого сбоя |
+| `control_poll_interval` | `0.5` | Интервал проверки паузы и отмены во время ожидания |
+
+```python
+import os
+
+from telegram_broadcast import BroadcastClient, RunPolicy
+
+client = BroadcastClient(
+    os.environ["TELEGRAM_BOT_TOKEN"],
+    database_path="data/broadcasts.sqlite3",
+    policy=RunPolicy(send_interval=0.1, report_interval=15),
+)
+```
+
+Перед использованием такого клиента войдите в `async with client` либо после работы вызовите `await client.close()` внутри своей асинхронной функции.
 
 ## Жизненный цикл и хранение
 
@@ -79,6 +135,22 @@ async with BroadcastClient(
 
 После перезапуска создайте клиент с тем же токеном и путём и вызовите `run(id)`. Рассылкой может управлять только клиент с тем же числовым ID бота. Это проверка принадлежности данных, не авторизация для публичного API.
 
+Методы принимают объект `uuid.UUID`, который возвращает `create()`. Если ID сохранён строкой, преобразуйте его через `UUID(saved_id)` из модуля `uuid`.
+
+`BroadcastResult` и результаты получателей — неизменяемые dataclass-объекты. Основные поля статистики:
+
+| Поле | Значение |
+| --- | --- |
+| `total` | Количество уникальных получателей |
+| `success`, `failed`, `unknown` | Подтверждённые отправки, отказы и неизвестные результаты |
+| `processed` | Сумма `success + failed + unknown` |
+| `remaining` | Количество ещё не обработанных получателей |
+| `error` | Ошибка, остановившая рассылку, если есть |
+| `next_retry_at` | Время следующей допустимой попытки в UTC либо `None` |
+| `notifications` | Кортеж результатов отчётов по чатам: `chat_id`, `message_id`, `error`, `updated_at` |
+
+`get_deliveries()` возвращает кортеж `DeliveryResult`: `chat_id`, `status`, `message_id`, `error`, `updated_at`. Состояния доставки: `pending`, `sending`, `success`, `failed`, `unknown`.
+
 ## Ошибки доставки
 
 Перед сетевым запросом коммитится `sending`. После подтверждённого ответа результат и счётчики коммитятся в одной транзакции.
@@ -88,15 +160,17 @@ async with BroadcastClient(
 | Пользователь заблокировал бота / чат недоступен | `failed` у получателя; остальные продолжают |
 | Telegram `RetryAfter` | Получатель остаётся `pending`; сохраняется общая пауза бота |
 | Сетевой сбой / серверная ошибка Telegram | `unknown`; запуск прекращается, остальные остаются для следующего `run()` |
-| Некорректный токен / сообщение | Рассылка становится `failed`; остаток не отправляется |
+| Telegram отклонил токен / содержимое сообщения | Рассылка становится `failed`; остаток не отправляется |
 | Прерывание процесса во время запроса | При следующем запуске `sending` становится `unknown` |
 | Ошибка БД / неожиданная программная ошибка | Исключение возвращается вызывающему коду; журнал позволяет восстановиться |
 
 Telegram не предоставляет ключ идемпотентности отправки. При потере ответа нельзя надёжно узнать, доставлено ли сообщение. `unknown` автоматически не повторяется, чтобы избежать дублей. При сбое записи после успешного ответа результат также может стать `unknown`. Счётчик `success` отражает подтверждённые и сохранённые ответы.
 
-Уведомления статистики отправляются в начале, периодически и при завершении запуска; существующее сообщение редактируется. Ожидаемые ошибки уведомления сохраняются отдельно и не ломают доставку. `RetryAfter` уведомления приостанавливает бота. Потеря ответа при отправке первого отчёта может привести к дублирующему сообщению статистики при повторе.
+Локальные проверки выполняются до отправки: неправильный формат токена отклоняется конструктором, некорректное сообщение — `BroadcastMessage`, пустые или недопустимые ID — `create()`. Ошибки проверки не создают рассылку со статусом `failed`.
 
-`RunPolicy` настраивает интервалы отправки, отчётов, повторного запуска после сетевого сбоя и проверки управления. HTML включён по умолчанию; для обычного текста задайте `parse_mode=None`. Поддерживаются текст, фото и видео по HTTP(S) URL; полученный Telegram file ID используется для следующих получателей этой рассылки. Локальные файлы, альбомы и клавиатуры в этой версии не поддерживаются.
+Ожидаемые ошибки публичного API: `BotBusy` при занятом боте, `BroadcastNotFound` при неизвестном UUID, `WrongBot` при чужой рассылке, `InvalidTransition` при недопустимом изменении состояния и `ConfigurationError` при ошибочной конфигурации или использовании закрытого клиента. Они наследуются от `BroadcastError` и импортируются из `telegram_broadcast`.
+
+Уведомления статистики отправляются в начале, периодически и при завершении запуска; существующее сообщение редактируется. Ожидаемые ошибки уведомления сохраняются отдельно и не ломают доставку. `RetryAfter` уведомления приостанавливает бота. Потеря ответа при отправке первого отчёта может привести к дублирующему сообщению статистики при повторе.
 
 ## Изменения версии 0.2
 
@@ -115,4 +189,4 @@ uv run pytest
 uv build
 ```
 
-Все тесты используют реальные временные файлы SQLite и штатную файловую блокировку; Telegram заменяется fake transport. Проверяются восстановление, повторное открытие, параллельные клиенты и освобождение блокировки после аварии отдельного процесса. CI настроен на Windows/Linux и Python 3.11/3.13.
+Тесты хранения используют реальные временные файлы SQLite и штатную файловую блокировку; Telegram заменяется fake transport. Проверяются восстановление, повторное открытие, параллельные клиенты и освобождение блокировки после аварии отдельного процесса. CI настроен на Windows/Linux и Python 3.11/3.13.
