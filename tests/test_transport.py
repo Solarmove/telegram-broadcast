@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.enums import ContentType
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
@@ -12,10 +14,11 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 from aiogram.methods import SendMessage
-from aiogram.types import Chat, Message
+from aiogram.types import Chat, FSInputFile, Message
 from conftest import TOKEN
 
 from telegram_broadcast import (
+    BroadcastMedia,
     BroadcastMessage,
     DeliveryUncertain,
     PermanentSendError,
@@ -69,6 +72,71 @@ async def test_chat_not_found_is_recipient_specific():
     )
     with pytest.raises(RecipientUnavailable):
         await adapter.send(1, BroadcastMessage("hello"), None)
+    await adapter.close()
+
+
+async def test_photo_url_is_sent_and_returned_file_id_is_cached():
+    adapter = AiogramTransport(TOKEN)
+    photo = SimpleNamespace(file_id="reusable-file")
+    adapter._bot.send_photo = AsyncMock(
+        return_value=SimpleNamespace(message_id=9, photo=[photo])
+    )
+    result = await adapter.send(
+        1,
+        BroadcastMessage(
+            "Caption",
+            media=BroadcastMedia(
+                ContentType.PHOTO, url="https://example.org/photo.jpg"
+            ),
+        ),
+        None,
+    )
+    adapter._bot.send_photo.assert_awaited_once_with(
+        1,
+        photo="https://example.org/photo.jpg",
+        caption="Caption",
+        parse_mode="HTML",
+    )
+    assert result.message_id == 9
+    assert result.media_file_id == "reusable-file"
+    await adapter.close()
+
+
+async def test_local_document_is_wrapped_as_input_file(tmp_path):
+    adapter = AiogramTransport(TOKEN)
+    adapter._bot.send_document = AsyncMock(
+        return_value=SimpleNamespace(
+            message_id=10, document=SimpleNamespace(file_id="document-id")
+        )
+    )
+    result = await adapter.send(
+        1,
+        BroadcastMessage(
+            "Document",
+            media=BroadcastMedia(
+                ContentType.DOCUMENT, path_to_file=str(tmp_path / "doc.pdf")
+            ),
+        ),
+        None,
+    )
+    call = adapter._bot.send_document.await_args
+    assert call is not None
+    sent_file = call.kwargs["document"]
+    assert isinstance(sent_file, FSInputFile)
+    assert result.media_file_id == "document-id"
+    await adapter.close()
+
+
+async def test_report_is_sent_to_requested_topic():
+    adapter = AiogramTransport(TOKEN)
+    adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=11))
+    assert await adapter.report(1, "Progress", None, thread_id=42) == 11
+    adapter._bot.send_message.assert_awaited_once_with(
+        1,
+        "Progress",
+        parse_mode=None,
+        message_thread_id=42,
+    )
     await adapter.close()
 
 

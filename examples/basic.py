@@ -13,7 +13,7 @@ async def main() -> None:
         job_id = await broadcasts.create(
             BroadcastMessage("<b>Hello!</b>"),
             recipient_ids=[123456789],
-            notification_chat_ids=[123456789],
+            notification_chats=[123456789],
             title="Example broadcast",
         )
         result = await broadcasts.run(job_id)

@@ -3,6 +3,7 @@
 from typing import Protocol
 
 from aiogram import Bot
+from aiogram.enums import ContentType
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
@@ -12,6 +13,7 @@ from aiogram.exceptions import (
     TelegramServerError,
     TelegramUnauthorizedError,
 )
+from aiogram.types import FSInputFile
 
 from .errors import (
     DeliveryUncertain,
@@ -19,14 +21,20 @@ from .errors import (
     RateLimited,
     RecipientUnavailable,
 )
-from .types import BroadcastMessage, MediaType, SentMessage
+from .types import BroadcastMessage, SentMessage
 
 
 class BroadcastTransport(Protocol):
     async def send(
         self, chat_id: int, message: BroadcastMessage, file_id: str | None
     ) -> SentMessage: ...
-    async def report(self, chat_id: int, text: str, message_id: int | None) -> int: ...
+    async def report(
+        self,
+        chat_id: int,
+        text: str,
+        message_id: int | None,
+        thread_id: int | None = None,
+    ) -> int: ...
 
 
 class AiogramTransport:
@@ -40,26 +48,26 @@ class AiogramTransport:
         self, chat_id: int, message: BroadcastMessage, file_id: str | None
     ) -> SentMessage:
         try:
-            if message.media_type == MediaType.PHOTO:
-                result = await self._bot.send_photo(
-                    chat_id,
-                    photo=file_id or message.media_url or "",
-                    caption=message.text,
-                    parse_mode=message.parse_mode,
-                )
+            if message.media is not None:
+                media = message.media
+                method_name, parameter, result_attribute = _MEDIA_METHODS[
+                    media.content_type
+                ]
+                source = file_id or media.file_id or media.url or media.path_to_file
+                if media.path_to_file is not None and file_id is None:
+                    source = FSInputFile(media.path_to_file)
+                kwargs: dict[str, object] = {parameter: source}
+                if media.content_type not in (
+                    ContentType.STICKER,
+                    ContentType.VIDEO_NOTE,
+                ):
+                    kwargs.update(caption=message.text, parse_mode=message.parse_mode)
+                result = await getattr(self._bot, method_name)(chat_id, **kwargs)
+                sent_media = getattr(result, result_attribute, None)
+                if media.content_type == ContentType.PHOTO and sent_media:
+                    sent_media = sent_media[-1]
                 return SentMessage(
-                    result.message_id,
-                    result.photo[-1].file_id if result.photo else None,
-                )
-            if message.media_type == MediaType.VIDEO:
-                result = await self._bot.send_video(
-                    chat_id,
-                    video=file_id or message.media_url or "",
-                    caption=message.text,
-                    parse_mode=message.parse_mode,
-                )
-                return SentMessage(
-                    result.message_id, result.video.file_id if result.video else None
+                    result.message_id, getattr(sent_media, "file_id", None)
                 )
             result = await self._bot.send_message(
                 chat_id, message.text or "", parse_mode=message.parse_mode
@@ -69,13 +77,27 @@ class AiogramTransport:
             _raise_if_translated(exc)
             raise
 
-    async def report(self, chat_id: int, text: str, message_id: int | None) -> int:
+    async def report(
+        self,
+        chat_id: int,
+        text: str,
+        message_id: int | None,
+        thread_id: int | None = None,
+    ) -> int:
         try:
             if message_id is None:
-                result = await self._bot.send_message(chat_id, text, parse_mode=None)
+                result = await self._bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode=None,
+                    message_thread_id=thread_id,
+                )
                 return result.message_id
             await self._bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message_id, parse_mode=None
+                text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode=None,
             )
             return message_id
         except TelegramBadRequest as exc:
@@ -88,12 +110,24 @@ class AiogramTransport:
                 message_id is not None
                 and "message to edit not found" in exc.message.lower()
             ):
-                return await self.report(chat_id, text, None)
+                return await self.report(chat_id, text, None, thread_id)
             _raise_if_translated(exc)
             raise
         except Exception as exc:
             _raise_if_translated(exc)
             raise
+
+
+_MEDIA_METHODS: dict[ContentType, tuple[str, str, str]] = {
+    ContentType.PHOTO: ("send_photo", "photo", "photo"),
+    ContentType.VIDEO: ("send_video", "video", "video"),
+    ContentType.DOCUMENT: ("send_document", "document", "document"),
+    ContentType.AUDIO: ("send_audio", "audio", "audio"),
+    ContentType.ANIMATION: ("send_animation", "animation", "animation"),
+    ContentType.VOICE: ("send_voice", "voice", "voice"),
+    ContentType.VIDEO_NOTE: ("send_video_note", "video_note", "video_note"),
+    ContentType.STICKER: ("send_sticker", "sticker", "sticker"),
+}
 
 
 def _translate(exc: Exception) -> Exception:

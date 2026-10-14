@@ -45,7 +45,7 @@ async def main() -> None:
         broadcast_id = await broadcasts.create(
             BroadcastMessage("<b>Новая акция!</b>"),
             recipient_ids=[123456789, 987654321],
-            notification_chat_ids=[123456789, -1001234567890],
+            notification_chats=[123456789, -1001234567890],
             title="Акция октября",
         )
         print("ID рассылки:", broadcast_id)
@@ -72,22 +72,25 @@ if __name__ == "__main__":
 
 ## Сообщения и настройки
 
-`BroadcastMessage` принимает `text`, `media_url`, `media_type` и `parse_mode`. HTML включён по умолчанию; для обычного текста задайте `parse_mode=None`, для MarkdownV2 — `parse_mode="MarkdownV2"`. Текст должен быть непустым, если не задано медиа. Библиотека проверяет длину исходной строки: до 4096 символов для текста и до 1024 для подписи к медиа.
+`BroadcastMessage` принимает текст, необязательный объект `BroadcastMedia` и `parse_mode`. HTML включён по умолчанию; для обычного текста задайте `parse_mode=None`, для MarkdownV2 — `parse_mode="MarkdownV2"`. Текст обязателен, если не задано медиа. Ограничение — 4096 символов для текста и 1024 для подписи к медиа.
 
-Для фото и видео одновременно указывайте HTTP(S) URL и значение перечисления `MediaType`; ссылка должна быть доступна Telegram:
+Медиа задаётся типом aiogram `ContentType` и ровно одним источником: `file_id`, HTTP(S) `url` или локальный `path_to_file`. Поддерживаются фото, видео, документ, аудио, анимация, voice, video note и sticker. Telegram file ID, полученный при первой отправке, сохраняется и повторно используется для следующих получателей.
 
 ```python
-from telegram_broadcast import BroadcastMessage, MediaType
+from aiogram.enums import ContentType
+from telegram_broadcast import BroadcastMedia, BroadcastMessage
 
 message = BroadcastMessage(
     text="Новое предложение",
-    media_url="https://example.org/photo.jpg",
-    media_type=MediaType.PHOTO,
+    media=BroadcastMedia(
+        content_type=ContentType.PHOTO,
+        url="https://example.org/photo.jpg",
+    ),
     parse_mode=None,
 )
 ```
 
-Для видео используйте `MediaType.VIDEO`. Полученный Telegram file ID сохраняется и используется для следующих получателей этой рассылки. Локальные файлы, альбомы и клавиатуры в версии 0.2.0 не поддерживаются.
+Для локального файла укажите `path_to_file="/path/to/photo.jpg"`; файл должен оставаться доступным при возобновлении рассылки. Для уже загруженного файла передайте `file_id="..."`. Для отчётов в Telegram-топик передайте `NotificationRecipient(chat_id, thread_id=...)` в `notification_chats`. Обычный ID чата также принимается как сокращённая форма.
 
 Параметр `policy` конструктора принимает `RunPolicy`. Все интервалы задаются в секундах:
 
@@ -127,7 +130,7 @@ client = BroadcastClient(
 | `tg_broadcast_notifications` | Сообщения статистики и ошибки по каждому чату |
 | `tg_broadcast_cooldowns` | Сохранённое ограничение скорости бота |
 
-Версия схемы хранится в `PRAGMA user_version`. В этой версии используется схема `1`; файл с другой ненулевой версией отклоняется явной ошибкой. При изменениях таблиц следующая версия библиотеки должна включать миграцию перед увеличением номера схемы.
+Версия схемы хранится в `PRAGMA user_version`. В этой версии используется схема `2`; база схемы `1` автоматически мигрирует прежние поля медиа и уведомлений. Неизвестная версия отклоняется явной ошибкой. При изменениях таблиц следующая версия библиотеки должна включать миграцию перед увеличением номера схемы.
 
 Используются WAL, `foreign_keys=ON`, `synchronous=FULL` и ожидание занятой SQLite до 30 секунд. Записи выполняются в коротких транзакциях; сетевые запросы не держат SQLite-транзакцию открытой. WAL позволяет читать результаты во время записи; SQLite по-прежнему допускает только одного писателя одновременно.
 

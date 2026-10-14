@@ -18,6 +18,7 @@ from .types import (
     BroadcastResult,
     BroadcastStatus,
     DeliveryResult,
+    NotificationRecipient,
     RunPolicy,
 )
 
@@ -30,6 +31,20 @@ def _ids(values: Iterable[int]) -> list[int]:
     ):
         raise ValueError("Chat IDs must be nonzero signed 64-bit integers")
     return list(dict.fromkeys(result))
+
+
+def _notification_recipients(
+    values: Iterable[NotificationRecipient | int],
+) -> list[NotificationRecipient]:
+    recipients: list[NotificationRecipient] = []
+    for item in values:
+        if type(item) is int:
+            recipients.append(NotificationRecipient(item))
+        elif isinstance(item, NotificationRecipient):
+            recipients.append(item)
+        else:
+            raise TypeError("notification_chats must contain chat IDs or recipients")
+    return list(dict.fromkeys(recipients))
 
 
 class BroadcastClient:
@@ -83,10 +98,11 @@ class BroadcastClient:
         message: BroadcastMessage,
         recipient_ids: Iterable[int],
         *,
-        notification_chat_ids: Iterable[int] = (),
+        notification_chats: Iterable[NotificationRecipient | int] = (),
         title: str = "Broadcast",
     ) -> UUID:
-        recipients, notifications = _ids(recipient_ids), _ids(notification_chat_ids)
+        recipients = _ids(recipient_ids)
+        notifications = _notification_recipients(notification_chats)
         if not recipients:
             raise ValueError("At least one recipient is required")
         if not title.strip() or len(title) > 200:

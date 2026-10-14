@@ -6,6 +6,8 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from aiogram.enums import ContentType
+
 
 class BroadcastStatus(StrEnum):
     QUEUED = "queued"
@@ -28,36 +30,65 @@ class DeliveryStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-class MediaType(StrEnum):
-    PHOTO = "photo"
-    VIDEO = "video"
+@dataclass(frozen=True)
+class BroadcastMedia:
+    content_type: ContentType
+    file_id: str | None = None
+    url: str | None = None
+    path_to_file: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content_type, ContentType):
+            raise TypeError("content_type must be an aiogram ContentType")
+        supported = {
+            ContentType.PHOTO,
+            ContentType.VIDEO,
+            ContentType.DOCUMENT,
+            ContentType.AUDIO,
+            ContentType.ANIMATION,
+            ContentType.VOICE,
+            ContentType.VIDEO_NOTE,
+            ContentType.STICKER,
+        }
+        if self.content_type not in supported:
+            raise ValueError(f"Unsupported media content type: {self.content_type}")
+        sources = (self.file_id, self.url, self.path_to_file)
+        if sum(source is not None for source in sources) != 1:
+            raise ValueError("Provide exactly one of file_id, url or path_to_file")
+        if self.file_id is not None and not self.file_id.strip():
+            raise ValueError("file_id cannot be empty")
+        if self.url is not None:
+            url = urlsplit(self.url)
+            if url.scheme not in ("http", "https") or not url.hostname:
+                raise ValueError("url must be an HTTP(S) URL accessible to Telegram")
+        if self.path_to_file is not None and not self.path_to_file.strip():
+            raise ValueError("path_to_file cannot be empty")
 
 
 @dataclass(frozen=True)
 class BroadcastMessage:
     text: str | None = None
-    media_url: str | None = None
-    media_type: MediaType | None = None
+    media: BroadcastMedia | None = None
     parse_mode: Literal["HTML", "MarkdownV2"] | None = "HTML"
 
     def __post_init__(self) -> None:
-        if not (self.text and self.text.strip()) and not self.media_url:
+        if not (self.text and self.text.strip()) and self.media is None:
             raise ValueError("Provide nonempty text or media")
-        if bool(self.media_url) != bool(self.media_type):
-            raise ValueError("media_url and media_type must be provided together")
-        if self.media_type is not None and not isinstance(self.media_type, MediaType):
-            raise TypeError("media_type must be a MediaType")
-        if self.media_url:
-            url = urlsplit(self.media_url)
-            if url.scheme not in ("http", "https") or not url.hostname:
-                raise ValueError(
-                    "media_url must be an HTTP(S) URL accessible to Telegram"
-                )
         if self.parse_mode not in ("HTML", "MarkdownV2", None):
             raise ValueError("Unsupported parse_mode")
-        limit = 1024 if self.media_url else 4096
+        limit = 1024 if self.media is not None else 4096
         if self.text and len(self.text) > limit:
             raise ValueError(f"Source text exceeds {limit} characters")
+        if (
+            self.media is not None
+            and self.media.content_type
+            in (
+                ContentType.STICKER,
+                ContentType.VIDEO_NOTE,
+            )
+            and self.text
+        ):
+            raise ValueError("This media type does not support a caption")
 
 
 @dataclass(frozen=True)
@@ -67,8 +98,24 @@ class SentMessage:
 
 
 @dataclass(frozen=True)
+class NotificationRecipient:
+    chat_id: int
+    thread_id: int | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (("chat_id", self.chat_id), ("thread_id", self.thread_id)):
+            if value is not None and (
+                type(value) is not int or value == 0 or not -(2**63) <= value < 2**63
+            ):
+                raise ValueError(f"{name} must be a nonzero signed 64-bit integer")
+        if self.thread_id is not None and self.thread_id < 0:
+            raise ValueError("thread_id must be positive")
+
+
+@dataclass(frozen=True)
 class NotificationResult:
     chat_id: int
+    thread_id: int | None
     message_id: int | None
     error: str | None
     updated_at: datetime | None

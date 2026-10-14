@@ -50,7 +50,10 @@ class Reporter:
     ) -> None:
         try:
             message_id = await self.transport.report(
-                notification.chat_id, report_text, notification.message_id
+                notification.chat_id,
+                report_text,
+                notification.message_id,
+                notification.thread_id,
             )
         except RateLimited as exc:
             async with self.sessions.begin() as session:
@@ -60,6 +63,7 @@ class Reporter:
                     session,
                     job_id,
                     notification.chat_id,
+                    notification.thread_id,
                     message_id=notification.message_id,
                     text=notification.last_text,
                     error=self.sanitize_error(exc),
@@ -70,6 +74,7 @@ class Reporter:
                     session,
                     job_id,
                     notification.chat_id,
+                    notification.thread_id,
                     message_id=notification.message_id,
                     text=notification.last_text,
                     error=self.sanitize_error(exc),
@@ -80,6 +85,7 @@ class Reporter:
                     session,
                     job_id,
                     notification.chat_id,
+                    notification.thread_id,
                     message_id=message_id,
                     text=report_text,
                     error=None,

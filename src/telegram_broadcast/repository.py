@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from aiogram.enums import ContentType
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,12 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .errors import BroadcastNotFound, InvalidTransition, WrongBot
 from .schema import BroadcastTables, utcnow
 from .types import (
+    BroadcastMedia,
     BroadcastMessage,
     BroadcastResult,
     BroadcastStatus,
     DeliveryResult,
     DeliveryStatus,
-    MediaType,
+    NotificationRecipient,
     NotificationResult,
 )
 
@@ -59,6 +61,7 @@ class PendingDelivery:
 @dataclass(frozen=True)
 class StoredNotification:
     chat_id: int
+    thread_id: int | None
     message_id: int | None
     error: str | None
     last_text: str | None
@@ -75,7 +78,7 @@ class Repository:
         session: AsyncSession,
         message: BroadcastMessage,
         recipients: list[int],
-        notification_chat_ids: list[int],
+        notification_recipients: list[NotificationRecipient],
         title: str,
     ) -> UUID:
         job_id = uuid4()
@@ -86,8 +89,12 @@ class Repository:
                 bot_id=self.bot_id,
                 title=title,
                 text=message.text,
-                media_url=message.media_url,
-                media_type=message.media_type.value if message.media_type else None,
+                media_content_type=(
+                    message.media.content_type.value if message.media else None
+                ),
+                media_source_file_id=(message.media.file_id if message.media else None),
+                media_url=message.media.url if message.media else None,
+                media_path=message.media.path_to_file if message.media else None,
                 parse_mode=message.parse_mode,
                 status=BroadcastStatus.QUEUED.value,
                 total=len(recipients),
@@ -107,12 +114,16 @@ class Repository:
                 ],
             )
         notifications = self.tables.notifications
-        for start in range(0, len(notification_chat_ids), 1000):
+        for start in range(0, len(notification_recipients), 1000):
             await session.execute(
                 insert(notifications),
                 [
-                    {"broadcast_id": job_id, "chat_id": chat_id}
-                    for chat_id in notification_chat_ids[start : start + 1000]
+                    {
+                        "broadcast_id": job_id,
+                        "chat_id": recipient.chat_id,
+                        "thread_id": recipient.thread_id or 0,
+                    }
+                    for recipient in notification_recipients[start : start + 1000]
                 ],
             )
         return job_id
@@ -136,8 +147,16 @@ class Repository:
             title=row["title"],
             message=BroadcastMessage(
                 text=row["text"],
-                media_url=row["media_url"],
-                media_type=MediaType(row["media_type"]) if row["media_type"] else None,
+                media=(
+                    BroadcastMedia(
+                        content_type=ContentType(row["media_content_type"]),
+                        file_id=row["media_source_file_id"],
+                        url=row["media_url"],
+                        path_to_file=row["media_path"],
+                    )
+                    if row["media_content_type"]
+                    else None
+                ),
                 parse_mode=row["parse_mode"],
             ),
             media_file_id=row["media_file_id"],
@@ -176,7 +195,11 @@ class Repository:
             updated_at=broadcast.updated_at,
             notifications=tuple(
                 NotificationResult(
-                    item.chat_id, item.message_id, item.error, item.updated_at
+                    item.chat_id,
+                    item.thread_id,
+                    item.message_id,
+                    item.error,
+                    item.updated_at,
                 )
                 for item in notifications
             ),
@@ -196,6 +219,7 @@ class Repository:
         return tuple(
             StoredNotification(
                 chat_id=row["chat_id"],
+                thread_id=row["thread_id"] or None,
                 message_id=row["message_id"],
                 error=row["error"],
                 last_text=row["last_text"],
@@ -486,6 +510,7 @@ class Repository:
         session: AsyncSession,
         job_id: UUID,
         chat_id: int,
+        thread_id: int | None,
         *,
         message_id: int | None,
         text: str | None,
@@ -494,7 +519,11 @@ class Repository:
         table = self.tables.notifications
         await session.execute(
             update(table)
-            .where(table.c.broadcast_id == job_id, table.c.chat_id == chat_id)
+            .where(
+                table.c.broadcast_id == job_id,
+                table.c.chat_id == chat_id,
+                table.c.thread_id == (thread_id or 0),
+            )
             .values(
                 message_id=message_id, last_text=text, error=error, updated_at=utcnow()
             )

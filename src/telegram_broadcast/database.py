@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from .errors import ConfigurationError
 from .schema import build_tables
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Database:
@@ -50,13 +50,15 @@ class Database:
                     await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
                     result = await connection.exec_driver_sql("PRAGMA user_version")
                     version = result.scalar_one()
-                    if version not in (0, SCHEMA_VERSION):
+                    if version not in (0, 1, SCHEMA_VERSION):
                         raise ConfigurationError(
                             f"Unsupported SQLite schema version {version}; "
                             f"this library supports version {SCHEMA_VERSION}"
                         )
+                    if version == 1:
+                        await _migrate_v1_to_v2(connection)
                     await connection.run_sync(self.tables.metadata.create_all)
-                    if version == 0:
+                    if version < SCHEMA_VERSION:
                         await connection.exec_driver_sql(
                             f"PRAGMA user_version={SCHEMA_VERSION}"
                         )
@@ -67,6 +69,48 @@ class Database:
     async def close(self) -> None:
         self._closed = True
         await self.engine.dispose()
+
+
+async def _migrate_v1_to_v2(connection) -> None:
+    jobs_name = "tg_broadcast_jobs"
+    notification_name = "tg_broadcast_notifications"
+    job_columns = await connection.exec_driver_sql(f'PRAGMA table_info("{jobs_name}")')
+    existing_job_columns = {row[1] for row in job_columns.fetchall()}
+    for name, type_ in (
+        ("media_content_type", "VARCHAR(32)"),
+        ("media_source_file_id", "TEXT"),
+        ("media_path", "TEXT"),
+    ):
+        if name not in existing_job_columns:
+            await connection.exec_driver_sql(
+                f'ALTER TABLE "{jobs_name}" ADD COLUMN "{name}" {type_}'
+            )
+    if "media_type" in existing_job_columns:
+        await connection.exec_driver_sql(
+            f'UPDATE "{jobs_name}" SET media_content_type = media_type '
+            "WHERE media_type IS NOT NULL"
+        )
+
+    legacy_name = f"{notification_name}_v1"
+    await connection.exec_driver_sql(
+        f'ALTER TABLE "{notification_name}" RENAME TO "{legacy_name}"'
+    )
+    await connection.exec_driver_sql(
+        f'CREATE TABLE "{notification_name}" ('
+        "broadcast_id CHAR(32) NOT NULL, "
+        "chat_id BIGINT NOT NULL, "
+        "thread_id BIGINT NOT NULL DEFAULT 0, "
+        "message_id BIGINT, error TEXT, last_text TEXT, updated_at DATETIME, "
+        f"PRIMARY KEY (broadcast_id, chat_id, thread_id), "
+        f'FOREIGN KEY(broadcast_id) REFERENCES "{jobs_name}" (id) ON DELETE CASCADE)'
+    )
+    await connection.exec_driver_sql(
+        f'INSERT INTO "{notification_name}" '
+        "(broadcast_id, chat_id, thread_id, message_id, error, last_text, updated_at) "
+        f"SELECT broadcast_id, chat_id, 0, message_id, error, last_text, updated_at "
+        f'FROM "{legacy_name}"'
+    )
+    await connection.exec_driver_sql(f'DROP TABLE "{legacy_name}"')
 
 
 def _configure_connection(connection: sqlite3.Connection, _record: object) -> None:

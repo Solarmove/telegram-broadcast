@@ -30,10 +30,10 @@ class FakeTransport:
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-        return SentMessage(chat_id + 100, "cached-media" if message.media_url else None)
+        return SentMessage(chat_id + 100, "cached-media" if message.media else None)
 
-    async def report(self, chat_id, text, message_id):
-        self.reports.append((chat_id, text, message_id))
+    async def report(self, chat_id, text, message_id, thread_id=None):
+        self.reports.append((chat_id, text, message_id, thread_id))
         errors = self.report_errors.get(chat_id, [])
         if errors:
             raise errors.pop(0)

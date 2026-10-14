@@ -3,17 +3,21 @@
 import asyncio
 import multiprocessing
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
+from aiogram.enums import ContentType
 from conftest import TOKEN, FakeTransport
 from sqlalchemy import text, update
 
 from telegram_broadcast import (
     BotBusy,
     BroadcastClient,
+    BroadcastMedia,
     BroadcastMessage,
     ConfigurationError,
+    NotificationRecipient,
     RateLimited,
     RunPolicy,
 )
@@ -27,7 +31,7 @@ async def test_reopen_preserves_results_and_prevents_duplicate_delivery(tmp_path
         TOKEN, database_path=path, transport=first_transport
     ) as first:
         job = await first.create(
-            BroadcastMessage("Hello"), [1, 2], notification_chat_ids=[-10]
+            BroadcastMessage("Hello"), [1, 2], notification_chats=[-10]
         )
         assert (await first.run(job)).success == 2
     second_transport = FakeTransport()
@@ -39,6 +43,49 @@ async def test_reopen_preserves_results_and_prevents_duplicate_delivery(tmp_path
         assert len(result.notifications) == 1
         assert len(await second.get_deliveries(job)) == 2
     assert not second_transport.sent and not second_transport.reports
+
+
+async def test_schema_v1_migrates_media_and_notifications(tmp_path):
+    path = tmp_path / "broadcasts.sqlite3"
+    async with BroadcastClient(
+        TOKEN, database_path=path, transport=FakeTransport()
+    ) as client:
+        job = await client.create(
+            BroadcastMessage(
+                "Photo",
+                media=BroadcastMedia(
+                    ContentType.PHOTO, url="https://example.org/photo.jpg"
+                ),
+            ),
+            [1],
+            notification_chats=[NotificationRecipient(-10)],
+        )
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "ALTER TABLE tg_broadcast_jobs ADD COLUMN media_type VARCHAR(8)"
+        )
+        connection.execute(
+            "UPDATE tg_broadcast_jobs "
+            "SET media_content_type = NULL, media_type = 'photo'"
+        )
+        connection.execute("PRAGMA user_version=1")
+
+    async with BroadcastClient(
+        TOKEN, database_path=path, transport=FakeTransport()
+    ) as migrated:
+        async with migrated._database.engine.connect() as connection:
+            assert await connection.scalar(text("PRAGMA user_version")) == 2
+        async with migrated._sessions() as session:
+            broadcast = await migrated._repository.get_broadcast(session, job)
+        assert broadcast.message.media is not None
+        assert broadcast.message.media.content_type is ContentType.PHOTO
+        assert broadcast.message.media.url == "https://example.org/photo.jpg"
+        notifications = await migrated.get_result(job)
+        assert len(notifications.notifications) == 1
+        async with migrated._sessions() as session:
+            rows = await migrated._repository.get_notifications(session, job)
+        assert rows[0].thread_id is None
 
 
 async def test_crash_journal_recovers_after_reopen(tmp_path):
@@ -118,9 +165,7 @@ async def test_connection_pragmas_and_foreign_keys(harness):
         assert await connection.scalar(text("PRAGMA foreign_keys")) == 1
         assert await connection.scalar(text("PRAGMA busy_timeout")) == 30000
         assert await connection.scalar(text("PRAGMA synchronous")) == 2
-    job = await client.create(
-        BroadcastMessage("Hello"), [1], notification_chat_ids=[-10]
-    )
+    job = await client.create(BroadcastMessage("Hello"), [1], notification_chats=[-10])
     async with engine.begin() as connection:
         await connection.execute(
             client._tables.broadcasts.delete().where(

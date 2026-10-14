@@ -1,18 +1,20 @@
 import asyncio
 
 import pytest
+from aiogram.enums import ContentType
 from conftest import TOKEN
 from sqlalchemy import inspect, select, update
 
 from telegram_broadcast import (
     BotBusy,
     BroadcastClient,
+    BroadcastMedia,
     BroadcastMessage,
     BroadcastStatus,
     DeliveryStatus,
     DeliveryUncertain,
     InvalidTransition,
-    MediaType,
+    NotificationRecipient,
     PermanentSendError,
     RateLimited,
     RecipientUnavailable,
@@ -23,7 +25,13 @@ from telegram_broadcast import (
 async def test_success_deduplication_reports_and_idempotent_run(harness):
     client, transport, *_ = harness
     job = await client.create(
-        BroadcastMessage("Hello"), [3, 1, 3, 2], notification_chat_ids=[-10, -20, -10]
+        BroadcastMessage("Hello"),
+        [3, 1, 3, 2],
+        notification_chats=[
+            NotificationRecipient(-10),
+            NotificationRecipient(-20),
+            NotificationRecipient(-10),
+        ],
     )
     result = await client.run(job)
     assert result.status == BroadcastStatus.COMPLETED
@@ -117,6 +125,11 @@ async def test_rate_limit_returns_retry_time_and_preserves_pending(harness):
     assert (await client.get_deliveries(job))[0].status == DeliveryStatus.PENDING
     async with engine.begin() as conn:
         await conn.execute(client._tables.cooldowns.delete())
+        await conn.execute(
+            update(client._tables.broadcasts)
+            .where(client._tables.broadcasts.c.id == job)
+            .values(next_retry_at=None)
+        )
     result = await client.run(job)
     assert result.success == 2
 
@@ -128,7 +141,12 @@ async def test_notification_failure_is_isolated_and_retryable(harness):
         RecipientUnavailable("blocked"),
     ]
     job = await client.create(
-        BroadcastMessage("Hello"), [1], notification_chat_ids=[-10, -20]
+        BroadcastMessage("Hello"),
+        [1],
+        notification_chats=[
+            NotificationRecipient(-10),
+            NotificationRecipient(-20),
+        ],
     )
     result = await client.run(job)
     assert result.success == 1
@@ -143,7 +161,9 @@ async def test_notification_rate_limit_blocks_delivery(harness):
     client, transport, *_ = harness
     transport.report_errors[-10] = [RateLimited(60)]
     job = await client.create(
-        BroadcastMessage("Hello"), [1], notification_chat_ids=[-10]
+        BroadcastMessage("Hello"),
+        [1],
+        notification_chats=[NotificationRecipient(-10)],
     )
     result = await client.run(job, wait_for_cooldown=False)
     assert result.processed == 0
@@ -206,11 +226,36 @@ async def test_wrong_bot_cannot_read_or_control(harness):
 async def test_media_file_id_reuse(harness):
     client, transport, *_ = harness
     job = await client.create(
-        BroadcastMessage("Caption", "https://example.org/photo.jpg", MediaType.PHOTO),
+        BroadcastMessage(
+            "Caption",
+            media=BroadcastMedia(
+                ContentType.PHOTO, url="https://example.org/photo.jpg"
+            ),
+        ),
         [1, 2],
     )
+    async with client._sessions() as session:
+        stored = await client._repository.get_broadcast(session, job)
+    assert stored.message.media is not None
+    assert stored.message.media.url == "https://example.org/photo.jpg"
     await client.run(job)
     assert transport.sent == [(1, None), (2, "cached-media")]
+
+
+async def test_notifications_are_unique_per_chat_and_thread(harness):
+    client, transport, *_ = harness
+    job = await client.create(
+        BroadcastMessage("Hello"),
+        [1],
+        notification_chats=[
+            NotificationRecipient(-10, thread_id=2),
+            NotificationRecipient(-10, thread_id=3),
+        ],
+    )
+    result = await client.run(job)
+    assert len(result.notifications) == 2
+    assert {item.thread_id for item in result.notifications} == {2, 3}
+    assert {report[3] for report in transport.reports} == {2, 3}
 
 
 @pytest.mark.parametrize("ids", [[], [0], [1, True], [2**63], ["1"]])
@@ -301,7 +346,9 @@ async def test_duration_expired_during_report_does_not_mark_delivery_uncertain(
 
     monkeypatch.setattr(transport, "report", slow_report)
     job = await client.create(
-        BroadcastMessage("Hello"), [1], notification_chat_ids=[-10]
+        BroadcastMessage("Hello"),
+        [1],
+        notification_chats=[NotificationRecipient(-10, thread_id=5)],
     )
     result = await client.run(job, max_duration=0.01)
     assert result.status == BroadcastStatus.QUEUED
