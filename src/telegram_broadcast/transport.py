@@ -1,5 +1,6 @@
 """Telegram adapter; network failures are translated into domain errors."""
 
+from collections.abc import Sequence
 from typing import Protocol
 
 from aiogram import Bot
@@ -21,10 +22,15 @@ from .errors import (
     RateLimited,
     RecipientUnavailable,
 )
-from .types import BroadcastMessage, SentMessage
+from .types import BroadcastMessage, NotificationRecipient, SentMessage
+from .validation import validate_configuration
 
 
 class BroadcastTransport(Protocol):
+    async def validate(
+        self, notifications: Sequence[NotificationRecipient]
+    ) -> None: ...
+
     async def send(
         self, chat_id: int, message: BroadcastMessage, file_id: str | None
     ) -> SentMessage: ...
@@ -43,6 +49,9 @@ class AiogramTransport:
 
     async def close(self) -> None:
         await self._bot.session.close()
+
+    async def validate(self, notifications: Sequence[NotificationRecipient]) -> None:
+        await validate_configuration(self._bot, notifications)
 
     async def send(
         self, chat_id: int, message: BroadcastMessage, file_id: str | None

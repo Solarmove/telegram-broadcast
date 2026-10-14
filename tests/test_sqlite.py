@@ -21,6 +21,7 @@ from telegram_broadcast import (
     RateLimited,
     RunPolicy,
 )
+from telegram_broadcast.database import SCHEMA_VERSION
 from telegram_broadcast.locking import FileBotLock
 
 
@@ -75,7 +76,9 @@ async def test_schema_v1_migrates_media_and_notifications(tmp_path):
         TOKEN, database_path=path, transport=FakeTransport()
     ) as migrated:
         async with migrated._database.engine.connect() as connection:
-            assert await connection.scalar(text("PRAGMA user_version")) == 2
+            assert (
+                await connection.scalar(text("PRAGMA user_version")) == SCHEMA_VERSION
+            )
         async with migrated._sessions() as session:
             broadcast = await migrated._repository.get_broadcast(session, job)
         assert broadcast.message.media is not None
@@ -86,6 +89,34 @@ async def test_schema_v1_migrates_media_and_notifications(tmp_path):
         async with migrated._sessions() as session:
             rows = await migrated._repository.get_notifications(session, job)
         assert rows[0].thread_id is None
+
+
+async def test_v2_database_gains_timestamps_without_losing_queued_job(tmp_path):
+    path = tmp_path / "v2.sqlite3"
+    async with BroadcastClient(
+        TOKEN, database_path=path, transport=FakeTransport()
+    ) as client:
+        job = await client.create(
+            BroadcastMessage("test"), [1], notification_chats=[-10]
+        )
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE tg_broadcast_jobs DROP COLUMN started_at")
+        connection.execute("ALTER TABLE tg_broadcast_jobs DROP COLUMN finished_at")
+        connection.execute("PRAGMA user_version=2")
+    async with BroadcastClient(
+        TOKEN, database_path=path, transport=FakeTransport()
+    ) as client:
+        queued = await client.get_result(job)
+        assert queued.started_at is None and queued.finished_at is None
+        finished = await client.run(job)
+        assert finished.success == 1 and len(finished.notifications) == 1
+        assert finished.started_at is not None and finished.finished_at is not None
+    async with BroadcastClient(
+        TOKEN, database_path=path, transport=FakeTransport()
+    ) as client:
+        reopened = await client.run(job)
+        assert reopened.started_at == finished.started_at
+        assert reopened.finished_at == finished.finished_at
 
 
 async def test_crash_journal_recovers_after_reopen(tmp_path):

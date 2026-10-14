@@ -107,6 +107,7 @@ class BroadcastClient:
             raise ValueError("At least one recipient is required")
         if not title.strip() or len(title) > 200:
             raise ValueError("title must contain 1 to 200 characters")
+        await self._transport.validate(notifications)
         await self._database.initialize()
         async with self._sessions.begin() as session:
             return await self._repository.create_broadcast(

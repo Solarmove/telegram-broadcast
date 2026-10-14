@@ -51,6 +51,8 @@ class StoredBroadcast:
     next_retry_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,8 @@ class Repository:
             next_retry_at=_aware(row["next_retry_at"]),
             created_at=_required_datetime(row["created_at"]),
             updated_at=_required_datetime(row["updated_at"]),
+            started_at=_aware(row["started_at"]),
+            finished_at=_aware(row["finished_at"]),
         )
 
     async def get_result(self, session: AsyncSession, job_id: UUID) -> BroadcastResult:
@@ -193,6 +197,8 @@ class Repository:
             next_retry_at=retry_at,
             created_at=broadcast.created_at,
             updated_at=broadcast.updated_at,
+            started_at=broadcast.started_at,
+            finished_at=broadcast.finished_at,
             notifications=tuple(
                 NotificationResult(
                     item.chat_id,
@@ -243,11 +249,33 @@ class Repository:
                 table.c.id == job_id,
                 table.c.status.in_([status.value for status in allowed]),
             )
-            .values(status=target.value, updated_at=utcnow())
+            .values(
+                status=target.value,
+                updated_at=utcnow(),
+                finished_at=utcnow() if target.terminal else None,
+            )
             .returning(table.c.id)
         )
         if updated.scalar_one_or_none() is None:
             raise InvalidTransition(f"Cannot change broadcast to {target.value}")
+
+    async def start_run(self, session: AsyncSession, job_id: UUID) -> None:
+        jobs = self.tables.broadcasts
+        await session.execute(
+            update(jobs)
+            .where(
+                jobs.c.id == job_id,
+                jobs.c.bot_id == self.bot_id,
+                jobs.c.status.in_(
+                    [BroadcastStatus.QUEUED.value, BroadcastStatus.RUNNING.value]
+                ),
+            )
+            .values(
+                status=BroadcastStatus.RUNNING.value,
+                started_at=func.coalesce(jobs.c.started_at, utcnow()),
+                updated_at=utcnow(),
+            )
+        )
 
     async def release_runner(self, session: AsyncSession, job_id: UUID) -> None:
         jobs = self.tables.broadcasts
@@ -276,6 +304,7 @@ class Repository:
             )
             .values(
                 status=BroadcastStatus.RUNNING.value,
+                started_at=func.coalesce(jobs.c.started_at, utcnow()),
                 next_retry_at=None,
                 updated_at=utcnow(),
             )
@@ -299,7 +328,11 @@ class Repository:
             await session.execute(
                 update(jobs)
                 .where(jobs.c.id == job_id)
-                .values(status=BroadcastStatus.COMPLETED.value, updated_at=utcnow())
+                .values(
+                    status=BroadcastStatus.COMPLETED.value,
+                    updated_at=utcnow(),
+                    finished_at=utcnow(),
+                )
             )
             return None
         return PendingDelivery(chat_id=row.chat_id)
@@ -476,7 +509,10 @@ class Repository:
             update(jobs)
             .where(jobs.c.id == job_id, jobs.c.bot_id == self.bot_id)
             .values(
-                status=BroadcastStatus.FAILED.value, error=error, updated_at=utcnow()
+                status=BroadcastStatus.FAILED.value,
+                error=error,
+                updated_at=utcnow(),
+                finished_at=utcnow(),
             )
         )
 

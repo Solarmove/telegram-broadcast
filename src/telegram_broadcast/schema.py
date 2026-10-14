@@ -67,6 +67,8 @@ def _build_tables(metadata: MetaData, names: list[str]) -> BroadcastTables:
         Column("unknown", Integer, nullable=False, default=0),
         Column("error", Text),
         Column("next_retry_at", DateTime(timezone=True)),
+        Column("started_at", DateTime(timezone=True)),
+        Column("finished_at", DateTime(timezone=True)),
         Column(
             "created_at",
             DateTime(timezone=True),

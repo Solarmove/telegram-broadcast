@@ -11,6 +11,17 @@ class ConfigurationError(BroadcastError):
     pass
 
 
+class PreflightError(ConfigurationError):
+    """Telegram configuration could not be verified; no broadcast was created."""
+
+    def __init__(self, issues: tuple[str, ...]) -> None:
+        self.issues = issues
+        super().__init__(
+            "Рассылка не создана: проверка Telegram не пройдена.\n"
+            + "\n".join(f"- {issue}" for issue in issues)
+        )
+
+
 class BroadcastNotFound(BroadcastError):
     pass
 

@@ -7,12 +7,16 @@ from time import monotonic
 
 from filelock import FileLock, Timeout
 from sqlalchemy import URL, event
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from .errors import ConfigurationError
 from .schema import build_tables
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -50,13 +54,15 @@ class Database:
                     await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
                     result = await connection.exec_driver_sql("PRAGMA user_version")
                     version = result.scalar_one()
-                    if version not in (0, 1, SCHEMA_VERSION):
+                    if version not in (0, 1, 2, SCHEMA_VERSION):
                         raise ConfigurationError(
                             f"Unsupported SQLite schema version {version}; "
                             f"this library supports version {SCHEMA_VERSION}"
                         )
                     if version == 1:
                         await _migrate_v1_to_v2(connection)
+                    if version in (1, 2):
+                        await _migrate_v2_to_v3(connection)
                     await connection.run_sync(self.tables.metadata.create_all)
                     if version < SCHEMA_VERSION:
                         await connection.exec_driver_sql(
@@ -71,7 +77,7 @@ class Database:
         await self.engine.dispose()
 
 
-async def _migrate_v1_to_v2(connection) -> None:
+async def _migrate_v1_to_v2(connection: AsyncConnection) -> None:
     jobs_name = "tg_broadcast_jobs"
     notification_name = "tg_broadcast_notifications"
     job_columns = await connection.exec_driver_sql(f'PRAGMA table_info("{jobs_name}")')
@@ -111,6 +117,16 @@ async def _migrate_v1_to_v2(connection) -> None:
         f'FROM "{legacy_name}"'
     )
     await connection.exec_driver_sql(f'DROP TABLE "{legacy_name}"')
+
+
+async def _migrate_v2_to_v3(connection: AsyncConnection) -> None:
+    columns = await connection.exec_driver_sql('PRAGMA table_info("tg_broadcast_jobs")')
+    existing = {row[1] for row in columns}
+    for name in ("started_at", "finished_at"):
+        if name not in existing:
+            await connection.exec_driver_sql(
+                f'ALTER TABLE tg_broadcast_jobs ADD COLUMN "{name}" DATETIME'
+            )
 
 
 def _configure_connection(connection: sqlite3.Connection, _record: object) -> None:

@@ -136,6 +136,8 @@ class BroadcastResult:
     created_at: datetime
     updated_at: datetime
     notifications: tuple[NotificationResult, ...] = ()
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
     @property
     def processed(self) -> int:
@@ -158,7 +160,7 @@ class DeliveryResult:
 @dataclass(frozen=True)
 class RunPolicy:
     send_interval: float = 0.05
-    report_interval: float = 30
+    report_interval: float = 5
     network_retry_delay: float = 5
     control_poll_interval: float = 0.5
 

@@ -16,6 +16,10 @@ class FakeTransport:
         self.started = asyncio.Event()
         self.release = None
         self.callback = None
+        self.validated = []
+
+    async def validate(self, notifications):
+        self.validated.append(tuple(notifications))
 
     async def send(self, chat_id, message, file_id):
         self.sent.append((chat_id, file_id))

@@ -36,7 +36,7 @@ class Runner:
         self.policy = policy
         self.sanitize_error = sanitize_error
         self.reporter = Reporter(repository, sessions, transport, sanitize_error)
-        self._last_report = float("-inf")
+        self._report_task: asyncio.Task[None] | None = None
 
     async def run(
         self, job_id: UUID, *, wait_for_cooldown: bool, max_duration: float | None
@@ -45,18 +45,47 @@ class Runner:
             monotonic() + max_duration if max_duration is not None else float("inf")
         )
         async with self.sessions.begin() as session:
-            await self.repo.get_broadcast(session, job_id)
+            broadcast = await self.repo.get_broadcast(session, job_id)
             await self.repo.recover_interrupted_deliveries(session, job_id)
+            await self.repo.start_run(session, job_id)
+
+        if broadcast.status.terminal or broadcast.status == BroadcastStatus.PAUSED:
+            await self.reporter.send(job_id)
+            return
+
+        await self.reporter.send(job_id)
+        stop_reports = asyncio.Event()
+        self._report_task = asyncio.create_task(
+            self._report_periodically(job_id, stop_reports)
+        )
 
         # Leave RUNNING persisted on cancellation or an unexpected error.
         # The next process can classify a stranded SENDING delivery as UNKNOWN.
-        await self._loop(job_id, wait_for_cooldown, deadline)
+        try:
+            await self._loop(job_id, wait_for_cooldown, deadline)
+        except BaseException:
+            self._report_task.cancel()
+            await asyncio.gather(self._report_task, return_exceptions=True)
+            raise
+        else:
+            stop_reports.set()
+            await self._report_task
         async with self.sessions.begin() as session:
             await self.repo.release_runner(session, job_id)
         await self.reporter.send(job_id)
 
+    async def _report_periodically(self, job_id: UUID, stop: asyncio.Event) -> None:
+        interval = max(self.policy.report_interval, self.policy.control_poll_interval)
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                await self.reporter.send(job_id)
+
     async def _loop(self, job_id: UUID, wait: bool, deadline: float) -> None:
         while monotonic() < deadline:
+            if self._report_task is not None and self._report_task.done():
+                self._report_task.result()
             async with self.sessions() as session:
                 broadcast = await self.repo.get_broadcast(session, job_id)
                 cooldown = await self.repo.get_cooldown(session)
@@ -104,9 +133,6 @@ class Runner:
         if delivery is None:
             return None
 
-        if monotonic() - self._last_report >= self.policy.report_interval:
-            await self.reporter.send(job_id)
-            self._last_report = monotonic()
         if monotonic() >= deadline:
             return None
         async with self.sessions.begin() as session:
