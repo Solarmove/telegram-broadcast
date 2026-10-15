@@ -3,6 +3,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
+
 from telegram_broadcast import (
     BroadcastMessage,
     BroadcastResult,
@@ -155,3 +157,57 @@ async def test_report_rate_limit_stops_requests_to_other_admins(harness):
     await client.run(job, wait_for_cooldown=False)
     assert [report[0] for report in transport.reports] == [-20]
     assert not transport.sent
+
+
+@pytest.mark.parametrize("language, heading, label", [
+    ("ru", "Рассылка остановлена из-за ошибки", "Причина ошибки"),
+    ("uk", "Розсилку зупинено через помилку", "Причина помилки"),
+])
+def test_stopping_error_is_in_localized_report(language, heading, label):
+    job = result(status=BroadcastStatus.FAILED, error="database unavailable",
+                 notification_language=language)
+    report = format_report(job, ProgressMetrics(10, 1, 1, 10))
+    assert heading in report
+    assert f"{label}: database unavailable" in report
+
+
+async def test_ukrainian_reports_and_language_survive_reopen(harness):
+    from conftest import TOKEN, FakeTransport
+
+    from telegram_broadcast import BroadcastClient
+
+    client, _, _ = harness
+    job = await client.create(BroadcastMessage("test"), [1],
+                              notification_chats=[-10], notification_language="uk")
+    transport = FakeTransport()
+    async with BroadcastClient(TOKEN, database_path=client.database_path,
+                               transport=transport) as reopened:
+        finished = await reopened.run(job)
+        assert finished.notification_language == "uk"
+    assert "Розсилка" in transport.reports[0][1]
+    assert "Розсилку завершено" in transport.reports[-1][1]
+    assert "Помилок: 0" in transport.reports[-1][1]
+
+
+async def test_invalid_language_rejected_before_creation(harness):
+    client, transport, _ = harness
+    with pytest.raises(ValueError, match="notification_language"):
+        await client.create(BroadcastMessage("test"), [1], notification_language="en")
+    assert not transport.validated
+
+
+async def test_unexpected_stopping_error_is_reported_and_redacted(harness):
+    from conftest import TOKEN
+
+    client, transport, _ = harness
+    transport.outcomes[1] = [RuntimeError(f"transport crashed {TOKEN}")]
+    job = await client.create(BroadcastMessage("test"), [1, 2],
+                              notification_chats=[-10], notification_language="uk")
+    with pytest.raises(RuntimeError):
+        await client.run(job)
+    report = transport.reports[-1][1]
+    assert "Розсилку зупинено через помилку" in report
+    assert "Причина помилки: transport crashed [redacted]" in report
+    assert TOKEN not in report
+    finished = await client.run(job)
+    assert finished.success == 1 and finished.unknown == 1

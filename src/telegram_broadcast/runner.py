@@ -1,6 +1,7 @@
 """Drive broadcast transitions; delegate all persistence to Repository."""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import timedelta
 from time import monotonic
@@ -19,6 +20,8 @@ from .repository import PendingDelivery, Repository, StoredBroadcast
 from .schema import utcnow
 from .transport import BroadcastTransport
 from .types import BroadcastStatus, DeliveryStatus, RunPolicy
+
+logger = logging.getLogger(__name__)
 
 
 class Runner:
@@ -63,9 +66,14 @@ class Runner:
         # The next process can classify a stranded SENDING delivery as UNKNOWN.
         try:
             await self._loop(job_id, wait_for_cooldown, deadline)
-        except BaseException:
+        except BaseException as exc:
             self._report_task.cancel()
             await asyncio.gather(self._report_task, return_exceptions=True)
+            if isinstance(exc, Exception):
+                try:
+                    await self.reporter.send(job_id, stop_error=self.sanitize_error(exc))
+                except Exception:
+                    logger.exception("Cannot report broadcast %s stopping error", job_id)
             raise
         else:
             stop_reports.set()
@@ -158,7 +166,7 @@ class Runner:
                 await self.repo.extend_cooldown(session, retry_at)
                 await self.repo.record_retry_after(session, job_id, retry_at)
             return True
-        except RecipientUnavailable as exc:
+        except (RecipientUnavailable, PermanentSendError) as exc:
             async with self.sessions.begin() as session:
                 await self.repo.finish_delivery(
                     session,
@@ -179,18 +187,7 @@ class Runner:
                 )
                 retry_at = utcnow() + timedelta(seconds=self.policy.network_retry_delay)
                 await self.repo.record_retry_after(session, job_id, retry_at)
-            return False
-        except PermanentSendError as exc:
-            async with self.sessions.begin() as session:
-                await self.repo.finish_delivery(
-                    session,
-                    job_id,
-                    chat_id,
-                    DeliveryStatus.FAILED,
-                    error=self.sanitize_error(exc),
-                )
-                await self.repo.set_failed(session, job_id, self.sanitize_error(exc))
-            return False
+            return True
 
         async with self.sessions.begin() as session:
             await self.repo.finish_delivery(

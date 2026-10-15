@@ -6,6 +6,7 @@ from typing import Protocol
 from aiogram import Bot
 from aiogram.enums import ContentType
 from aiogram.exceptions import (
+    TelegramAPIError,
     TelegramBadRequest,
     TelegramForbiddenError,
     TelegramNetworkError,
@@ -154,6 +155,8 @@ def _translate(exc: Exception) -> Exception:
             return RecipientUnavailable(str(exc))
         return PermanentSendError(str(exc))
     if isinstance(exc, TelegramUnauthorizedError):
+        return PermanentSendError(str(exc))
+    if isinstance(exc, TelegramAPIError):
         return PermanentSendError(str(exc))
     return exc
 

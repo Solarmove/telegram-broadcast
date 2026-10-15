@@ -278,3 +278,17 @@ async def test_process_lock_is_released_after_crash(tmp_path):
             process.terminate()
             await asyncio.to_thread(process.join, 5)
         process.close()
+
+
+async def test_v3_migration_defaults_existing_jobs_to_russian(tmp_path):
+    path = tmp_path / "v3.sqlite3"
+    async with BroadcastClient(TOKEN, database_path=path,
+                               transport=FakeTransport()) as client:
+        job = await client.create(BroadcastMessage("test"), [1])
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE tg_broadcast_jobs DROP COLUMN notification_language")
+        connection.execute("PRAGMA user_version=3")
+    async with BroadcastClient(TOKEN, database_path=path,
+                               transport=FakeTransport()) as client:
+        assert (await client.get_result(job)).notification_language == "ru"
+        assert (await client.run(job)).success == 1

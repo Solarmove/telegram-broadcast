@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from math import isfinite
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from aiogram.utils.token import extract_bot_id, validate_token
@@ -100,7 +101,10 @@ class BroadcastClient:
         *,
         notification_chats: Iterable[NotificationRecipient | int] = (),
         title: str = "Broadcast",
+        notification_language: Literal["ru", "uk"] = "ru",
     ) -> UUID:
+        if notification_language not in ("ru", "uk"):
+            raise ValueError("notification_language must be ru or uk")
         recipients = _ids(recipient_ids)
         notifications = _notification_recipients(notification_chats)
         if not recipients:
@@ -111,7 +115,7 @@ class BroadcastClient:
         await self._database.initialize()
         async with self._sessions.begin() as session:
             return await self._repository.create_broadcast(
-                session, message, recipients, notifications, title
+                session, message, recipients, notifications, title, notification_language
             )
 
     async def get_result(self, job_id: UUID) -> BroadcastResult:

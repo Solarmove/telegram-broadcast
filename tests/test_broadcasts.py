@@ -70,17 +70,17 @@ async def test_recipient_failure_does_not_stop_others(harness):
     assert result.status == BroadcastStatus.COMPLETED
 
 
-async def test_uncertain_delivery_stops_and_is_never_resent(harness):
+async def test_uncertain_delivery_continues_and_is_never_resent(harness):
     client, transport, *_ = harness
     transport.outcomes[1] = [DeliveryUncertain("timeout")]
     job = await client.create(BroadcastMessage("Hello"), [1, 2, 3])
     result = await client.run(job)
     assert (result.status, result.unknown, result.remaining) == (
-        BroadcastStatus.QUEUED,
+        BroadcastStatus.COMPLETED,
         1,
-        2,
+        0,
     )
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == 3
     result = await client.run(job)
     assert result.success == 2
     assert result.unknown == 1
@@ -102,16 +102,30 @@ async def test_cancellation_recovery_preserves_uncertainty(harness):
     assert [s[0] for s in transport.sent] == [1, 2]
 
 
-async def test_permanent_failure_stops_broadcast_and_redacts_token(harness):
+@pytest.mark.parametrize("message", [
+    "Bad Request: not enough rights to send text messages to the chat",
+    "invalid token",
+    "cannot parse entities",
+])
+async def test_permanent_failure_continues_and_redacts_token(harness, message):
     client, transport, engine, *_ = harness
-    transport.outcomes[1] = [PermanentSendError(f"invalid token {TOKEN}")]
-    job = await client.create(BroadcastMessage("Hello"), [1, 2])
+    transport.outcomes[1] = [PermanentSendError(f"{message} {TOKEN}")]
+    job = await client.create(
+        BroadcastMessage("Hello"), [1, 2],
+        notification_chats=[NotificationRecipient(-10)],
+    )
     result = await client.run(job)
-    assert result.status == BroadcastStatus.FAILED
-    assert result.remaining == 1
-    assert TOKEN not in result.error
+    assert result.status == BroadcastStatus.COMPLETED
+    assert (result.failed, result.success, result.remaining) == (1, 1, 0)
+    deliveries = await client.get_deliveries(job)
+    assert message in deliveries[0].error
+    assert TOKEN not in deliveries[0].error
+    assert deliveries[1].status == DeliveryStatus.SUCCESS
+    assert "Ошибок: 1" in transport.reports[-1][1]
+    await client.run(job)
+    assert [s[0] for s in transport.sent] == [1, 2]
     async with engine.connect() as conn:
-        rows = (await conn.execute(select(client._tables.broadcasts))).mappings().all()
+        rows = (await conn.execute(select(client._tables.deliveries))).mappings().all()
     assert TOKEN not in str(rows)
 
 

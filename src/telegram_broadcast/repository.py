@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 from aiogram.enums import ContentType
@@ -53,6 +54,7 @@ class StoredBroadcast:
     updated_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    notification_language: Literal["ru", "uk"]
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ class Repository:
         recipients: list[int],
         notification_recipients: list[NotificationRecipient],
         title: str,
+        notification_language: Literal["ru", "uk"] = "ru",
     ) -> UUID:
         job_id = uuid4()
         jobs = self.tables.broadcasts
@@ -90,6 +93,7 @@ class Repository:
                 id=job_id,
                 bot_id=self.bot_id,
                 title=title,
+                notification_language=notification_language,
                 text=message.text,
                 media_content_type=(
                     message.media.content_type.value if message.media else None
@@ -147,6 +151,7 @@ class Repository:
             id=row["id"],
             bot_id=row["bot_id"],
             title=row["title"],
+            notification_language=row["notification_language"],
             message=BroadcastMessage(
                 text=row["text"],
                 media=(
@@ -188,6 +193,7 @@ class Repository:
             id=broadcast.id,
             bot_id=broadcast.bot_id,
             title=broadcast.title,
+            notification_language=broadcast.notification_language,
             status=broadcast.status,
             total=broadcast.total,
             success=broadcast.success,

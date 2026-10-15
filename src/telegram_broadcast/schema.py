@@ -53,6 +53,7 @@ def _build_tables(metadata: MetaData, names: list[str]) -> BroadcastTables:
         Column("id", Uuid, primary_key=True),
         Column("bot_id", BigInteger, nullable=False),
         Column("title", String(200), nullable=False),
+        Column("notification_language", String(2), nullable=False, server_default="ru"),
         Column("text", Text),
         Column("media_content_type", String(32)),
         Column("media_source_file_id", Text),

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 from .errors import ConfigurationError
 from .schema import build_tables
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -54,7 +54,7 @@ class Database:
                     await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
                     result = await connection.exec_driver_sql("PRAGMA user_version")
                     version = result.scalar_one()
-                    if version not in (0, 1, 2, SCHEMA_VERSION):
+                    if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                         raise ConfigurationError(
                             f"Unsupported SQLite schema version {version}; "
                             f"this library supports version {SCHEMA_VERSION}"
@@ -63,6 +63,8 @@ class Database:
                         await _migrate_v1_to_v2(connection)
                     if version in (1, 2):
                         await _migrate_v2_to_v3(connection)
+                    if version in (1, 2, 3):
+                        await _migrate_v3_to_v4(connection)
                     await connection.run_sync(self.tables.metadata.create_all)
                     if version < SCHEMA_VERSION:
                         await connection.exec_driver_sql(
@@ -127,6 +129,15 @@ async def _migrate_v2_to_v3(connection: AsyncConnection) -> None:
             await connection.exec_driver_sql(
                 f'ALTER TABLE tg_broadcast_jobs ADD COLUMN "{name}" DATETIME'
             )
+
+
+async def _migrate_v3_to_v4(connection: AsyncConnection) -> None:
+    columns = await connection.exec_driver_sql('PRAGMA table_info("tg_broadcast_jobs")')
+    if "notification_language" not in {row[1] for row in columns}:
+        await connection.exec_driver_sql(
+            "ALTER TABLE tg_broadcast_jobs ADD COLUMN "
+            "notification_language VARCHAR(2) NOT NULL DEFAULT 'ru'"
+        )
 
 
 def _configure_connection(connection: sqlite3.Connection, _record: object) -> None:

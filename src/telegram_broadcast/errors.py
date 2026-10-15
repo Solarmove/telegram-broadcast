@@ -47,7 +47,7 @@ class DeliveryUncertain(BroadcastError):
 
 
 class PermanentSendError(BroadcastError):
-    """Invalid credentials or content; stop this broadcast."""
+    """Telegram rejected the send; record the failure and continue."""
 
 
 class RateLimited(BroadcastError):

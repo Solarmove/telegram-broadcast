@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from time import monotonic
 from uuid import UUID
@@ -37,13 +38,16 @@ class Reporter:
         self.sanitize_error = sanitize_error
         self._progress = ProgressTracker()
 
-    async def send(self, job_id: UUID) -> None:
+    async def send(self, job_id: UUID, *, stop_error: str | None = None) -> None:
         async with self.sessions() as session:
             result = await self.repo.get_result(session, job_id)
             notifications = await self.repo.get_notifications(session, job_id)
             cooldown = await self.repo.get_cooldown(session)
         if cooldown is not None and cooldown > utcnow():
             return
+
+        if stop_error is not None:
+            result = replace(result, status=BroadcastStatus.FAILED, error=stop_error)
 
         metrics = self._progress.sample(
             result, now=utcnow(), monotonic_time=monotonic()
@@ -117,7 +121,7 @@ class Reporter:
         )
 
 
-def format_report(result: BroadcastResult, metrics: ProgressMetrics) -> str:
+def _format_russian_report(result: BroadcastResult, metrics: ProgressMetrics) -> str:
     unknown = f"\n⚠️ Неизвестно: {result.unknown}" if result.unknown else ""
     if result.status.terminal:
         heading = {
@@ -155,3 +159,39 @@ def format_report(result: BroadcastResult, metrics: ProgressMetrics) -> str:
         f"Текущая: {metrics.current_speed:.2f} msg/s\n\n"
         f"⏱ Прошло: {metrics.elapsed:.1f} сек\n⏳ Осталось: {eta}"
     )
+
+
+_UK_REPORT_TEXT = {
+    "Рассылка остановлена из-за ошибки": "Розсилку зупинено через помилку",
+    "Рассылка ожидает продолжения": "Розсилка очікує продовження",
+    "Рассылка приостановлена": "Розсилку призупинено",
+    "Рассылка завершена": "Розсилку завершено",
+    "Рассылка отменена": "Розсилку скасовано",
+    "Рассылка": "Розсилка",
+    "Средняя скорость": "Середня швидкість",
+    "сообщений/сек": "повідомлень/с",
+    "Неизвестно": "Невідомо",
+    "Успешно": "Успішно",
+    "Ошибок": "Помилок",
+    "Обработано": "Оброблено",
+    "Успешность": "Успішність",
+    "Время": "Час",
+    "Средняя": "Середня",
+    "Текущая": "Поточна",
+    "Прошло": "Минуло",
+    "Осталось": "Залишилося",
+    "рассчитывается": "обчислюється",
+    "msg/s": "повідомлень/с",
+    "сек": "с",
+}
+
+
+def format_report(result: BroadcastResult, metrics: ProgressMetrics) -> str:
+    text = _format_russian_report(result, metrics)
+    if result.notification_language == "uk":
+        for source, translated in _UK_REPORT_TEXT.items():
+            text = text.replace(source, translated)
+    if result.error:
+        label = "Причина помилки" if result.notification_language == "uk" else "Причина ошибки"
+        text += f"\n\n⚠️ {label}: {result.error[:2000]}"
+    return text

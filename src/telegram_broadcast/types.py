@@ -138,6 +138,7 @@ class BroadcastResult:
     notifications: tuple[NotificationResult, ...] = ()
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    notification_language: Literal["ru", "uk"] = "ru"
 
     @property
     def processed(self) -> int:
